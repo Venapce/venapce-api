@@ -1,0 +1,4 @@
+.env
+/venapce-api
+/bin/
+*.out
