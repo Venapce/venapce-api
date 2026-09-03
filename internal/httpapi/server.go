@@ -6,17 +6,18 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/logger"
-	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/cors"
+	"github.com/gofiber/fiber/v3/middleware/logger"
+	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/inflowenger/venapce-api/internal/config"
-	"github.com/inflowenger/venapce-api/internal/cryptobox"
-	"github.com/inflowenger/venapce-api/internal/db"
-	"github.com/inflowenger/venapce-api/internal/superset"
+	"github.com/Venapce/venapce-api/internal/config"
+	"github.com/Venapce/venapce-api/internal/cryptobox"
+	"github.com/Venapce/venapce-api/internal/db"
+	"github.com/Venapce/venapce-api/internal/superset"
 )
 
 type Server struct {
@@ -44,12 +45,12 @@ func (s *Server) App() *fiber.App {
 	app.Use(recover.New())
 	app.Use(logger.New())
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: s.cfg.CORSOrigins,
-		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
-		AllowMethods: "GET, POST, PUT, DELETE, OPTIONS",
+		AllowOrigins: splitCSV(s.cfg.CORSOrigins),
+		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 	}))
 
-	app.Get("/healthz", func(c *fiber.Ctx) error {
+	app.Get("/healthz", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok"})
 	})
 
@@ -100,12 +101,24 @@ func (s *Server) LoadSupersetFromDB(ctx context.Context) error {
 	return nil
 }
 
-func errorHandler(c *fiber.Ctx, err error) error {
+func errorHandler(c fiber.Ctx, err error) error {
 	code := fiber.StatusInternalServerError
 	if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
 	}
 	return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+}
+
+// splitCSV turns a comma-separated origins list into the []string that Fiber v3
+// CORS expects, trimming surrounding spaces and dropping empty entries.
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // rawOr returns m when it is non-empty JSON, else the given fallback literal.

@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/inflowenger/venapce-api/internal/db"
-	"github.com/inflowenger/venapce-api/internal/superset"
+	"github.com/Venapce/venapce-api/internal/db"
+	"github.com/Venapce/venapce-api/internal/superset"
 )
 
 const supersetSettingKey = "superset"
@@ -42,7 +42,7 @@ func (s *Server) loadSupersetConfig(ctx context.Context) (*supersetConfig, error
 }
 
 // GET /api/settings/superset — public-safe view (no secrets).
-func (s *Server) getSupersetSettings(c *fiber.Ctx) error {
+func (s *Server) getSupersetSettings(c fiber.Ctx) error {
 	cfg, err := s.loadSupersetConfig(c.Context())
 	if err != nil {
 		return err
@@ -65,9 +65,9 @@ type putSupersetBody struct {
 
 // PUT /api/settings/superset — save connection, encrypt the password, rebuild the
 // live client, and report whether a login succeeds.
-func (s *Server) putSupersetSettings(c *fiber.Ctx) error {
+func (s *Server) putSupersetSettings(c fiber.Ctx) error {
 	var body putSupersetBody
-	if err := c.BodyParser(&body); err != nil {
+	if err := c.Bind().Body(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
 	}
 	if body.URL == "" || body.Username == "" {
@@ -124,7 +124,7 @@ func (s *Server) putSupersetSettings(c *fiber.Ctx) error {
 }
 
 // POST /api/settings/superset/test — probe the currently stored connection.
-func (s *Server) testSupersetSettings(c *fiber.Ctx) error {
+func (s *Server) testSupersetSettings(c fiber.Ctx) error {
 	client := s.sup.Get()
 	if client == nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Superset is not configured")

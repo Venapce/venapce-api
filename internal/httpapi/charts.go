@@ -5,10 +5,10 @@ import (
 	"errors"
 	"strconv"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/inflowenger/venapce-api/internal/db"
+	"github.com/Venapce/venapce-api/internal/db"
 )
 
 type chartBody struct {
@@ -18,7 +18,7 @@ type chartBody struct {
 	BuilderState json.RawMessage `json:"builderState"`
 }
 
-func idParam(c *fiber.Ctx) (int64, error) {
+func idParam(c fiber.Ctx) (int64, error) {
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil {
 		return 0, fiber.NewError(fiber.StatusBadRequest, "invalid id")
@@ -26,7 +26,7 @@ func idParam(c *fiber.Ctx) (int64, error) {
 	return id, nil
 }
 
-func (s *Server) listCharts(c *fiber.Ctx) error {
+func (s *Server) listCharts(c fiber.Ctx) error {
 	charts, err := s.q.ListCharts(c.Context())
 	if err != nil {
 		return err
@@ -34,7 +34,7 @@ func (s *Server) listCharts(c *fiber.Ctx) error {
 	return c.JSON(charts)
 }
 
-func (s *Server) getChart(c *fiber.Ctx) error {
+func (s *Server) getChart(c fiber.Ctx) error {
 	id, err := idParam(c)
 	if err != nil {
 		return err
@@ -49,9 +49,9 @@ func (s *Server) getChart(c *fiber.Ctx) error {
 	return c.JSON(chart)
 }
 
-func (s *Server) createChart(c *fiber.Ctx) error {
+func (s *Server) createChart(c fiber.Ctx) error {
 	var body chartBody
-	if err := c.BodyParser(&body); err != nil {
+	if err := c.Bind().Body(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
 	}
 	if body.Title == "" {
@@ -72,13 +72,13 @@ func (s *Server) createChart(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(chart)
 }
 
-func (s *Server) updateChart(c *fiber.Ctx) error {
+func (s *Server) updateChart(c fiber.Ctx) error {
 	id, err := idParam(c)
 	if err != nil {
 		return err
 	}
 	var body chartBody
-	if err := c.BodyParser(&body); err != nil {
+	if err := c.Bind().Body(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
 	}
 	if body.VizType == "" {
@@ -100,7 +100,7 @@ func (s *Server) updateChart(c *fiber.Ctx) error {
 	return c.JSON(chart)
 }
 
-func (s *Server) deleteChart(c *fiber.Ctx) error {
+func (s *Server) deleteChart(c fiber.Ctx) error {
 	id, err := idParam(c)
 	if err != nil {
 		return err

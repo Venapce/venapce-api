@@ -7,10 +7,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/inflowenger/venapce-api/internal/config"
-	"github.com/inflowenger/venapce-api/internal/cryptobox"
-	"github.com/inflowenger/venapce-api/internal/httpapi"
-	"github.com/inflowenger/venapce-api/internal/store"
+	"github.com/Venapce/venapce-api/internal/config"
+	"github.com/Venapce/venapce-api/internal/cryptobox"
+	"github.com/Venapce/venapce-api/internal/httpapi"
+	"github.com/Venapce/venapce-api/internal/store"
 )
 
 func main() {

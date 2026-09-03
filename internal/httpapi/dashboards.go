@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/inflowenger/venapce-api/internal/db"
+	"github.com/Venapce/venapce-api/internal/db"
 )
 
 type dashboardBody struct {
@@ -16,7 +16,7 @@ type dashboardBody struct {
 	Layout json.RawMessage `json:"layout"`
 }
 
-func (s *Server) listDashboards(c *fiber.Ctx) error {
+func (s *Server) listDashboards(c fiber.Ctx) error {
 	dashboards, err := s.q.ListDashboards(c.Context())
 	if err != nil {
 		return err
@@ -24,7 +24,7 @@ func (s *Server) listDashboards(c *fiber.Ctx) error {
 	return c.JSON(dashboards)
 }
 
-func (s *Server) getDashboard(c *fiber.Ctx) error {
+func (s *Server) getDashboard(c fiber.Ctx) error {
 	id, err := idParam(c)
 	if err != nil {
 		return err
@@ -39,9 +39,9 @@ func (s *Server) getDashboard(c *fiber.Ctx) error {
 	return c.JSON(d)
 }
 
-func (s *Server) createDashboard(c *fiber.Ctx) error {
+func (s *Server) createDashboard(c fiber.Ctx) error {
 	var body dashboardBody
-	if err := c.BodyParser(&body); err != nil {
+	if err := c.Bind().Body(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
 	}
 	if body.Title == "" {
@@ -58,13 +58,13 @@ func (s *Server) createDashboard(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(d)
 }
 
-func (s *Server) updateDashboard(c *fiber.Ctx) error {
+func (s *Server) updateDashboard(c fiber.Ctx) error {
 	id, err := idParam(c)
 	if err != nil {
 		return err
 	}
 	var body dashboardBody
-	if err := c.BodyParser(&body); err != nil {
+	if err := c.Bind().Body(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
 	}
 	d, err := s.q.UpdateDashboard(c.Context(), db.UpdateDashboardParams{
@@ -82,7 +82,7 @@ func (s *Server) updateDashboard(c *fiber.Ctx) error {
 	return c.JSON(d)
 }
 
-func (s *Server) deleteDashboard(c *fiber.Ctx) error {
+func (s *Server) deleteDashboard(c fiber.Ctx) error {
 	id, err := idParam(c)
 	if err != nil {
 		return err
