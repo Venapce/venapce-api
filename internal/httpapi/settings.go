@@ -135,3 +135,47 @@ func (s *Server) testSupersetSettings(c fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{"connected": true, "connectedAs": who})
 }
+
+// GET /api/settings/superset/examples/status — on-demand example-data load state
+// (idle | running | loaded | failed), proxied from the Superset control blueprint.
+func (s *Server) getExamplesStatus(c fiber.Ctx) error {
+	client := s.sup.Get()
+	if client == nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Superset is not configured")
+	}
+	status, body, err := client.ExamplesStatus(c.Context())
+	if err != nil {
+		return err
+	}
+	return passThroughJSON(c, status, body)
+}
+
+// POST /api/settings/superset/examples — trigger a background load of Superset's
+// example datasets (handy for a demo). Idempotent; see the control blueprint.
+func (s *Server) loadExamples(c fiber.Ctx) error {
+	client := s.sup.Get()
+	if client == nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Superset is not configured")
+	}
+	status, body, err := client.LoadExamples(c.Context())
+	if err != nil {
+		return err
+	}
+	return passThroughJSON(c, status, body)
+}
+
+// passThroughJSON relays the control blueprint's JSON body to the front. The
+// blueprint encodes the outcome in the JSON `state` field, so its 202 (started)
+// and 409 (already running) are normal and collapse to 200 — the front keys off
+// `state`. Real errors (401/403/5xx) pass through so apiErr surfaces them. A
+// missing/opaque body (e.g. an nginx error page) becomes a 502.
+func passThroughJSON(c fiber.Ctx, status int, body []byte) error {
+	if len(body) == 0 || body[0] != '{' {
+		return fiber.NewError(fiber.StatusBadGateway, "unexpected response from Superset control endpoint")
+	}
+	if status == fiber.StatusAccepted || status == fiber.StatusConflict {
+		status = fiber.StatusOK
+	}
+	c.Set("Content-Type", "application/json")
+	return c.Status(status).Send(body)
+}

@@ -28,8 +28,35 @@ type Dashboard struct {
 	UpdatedAt time.Time       `json:"updatedAt"`
 }
 
+type Issue struct {
+	ID        int64           `json:"id"`
+	Title     string          `json:"title"`
+	Summary   string          `json:"summary"`
+	Status    string          `json:"status"`
+	Severity  string          `json:"severity"`
+	Tags      []string        `json:"tags"`
+	Source    string          `json:"source"`
+	Assignee  string          `json:"assignee"`
+	Data      json.RawMessage `json:"data"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+}
+
 type Setting struct {
 	Key       string          `json:"key"`
 	Value     json.RawMessage `json:"value"`
 	UpdatedAt time.Time       `json:"updatedAt"`
+}
+
+type Stage struct {
+	ID          int64           `json:"id"`
+	Title       string          `json:"title"`
+	Summary     string          `json:"summary"`
+	Source      string          `json:"source"`
+	Disposition string          `json:"disposition"`
+	IssueID     int64           `json:"issueId"`
+	Tags        []string        `json:"tags"`
+	Data        json.RawMessage `json:"data"`
+	ReceivedAt  time.Time       `json:"receivedAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
 }

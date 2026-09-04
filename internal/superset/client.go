@@ -162,6 +162,86 @@ func (c *Client) ChartData(ctx context.Context, queryContext json.RawMessage) (j
 	return out, nil
 }
 
+// Post sends a write to Superset (e.g. POST /dataset/) and returns the response
+// body verbatim (typically {id, result}). Auth/refresh/CSRF are handled by call.
+func (c *Client) Post(ctx context.Context, path string, body json.RawMessage) (json.RawMessage, error) {
+	var out json.RawMessage
+	if err := c.call(ctx, http.MethodPost, path, body, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ---- venapce control blueprint (mounted at /venapce, outside /api/v1) ----
+
+// ExamplesStatus fetches the on-demand example-load status from the Venapce
+// control blueprint inside Superset. Returns Superset's HTTP status alongside
+// the JSON body so the handler can pass both straight back to the front.
+func (c *Client) ExamplesStatus(ctx context.Context) (int, json.RawMessage, error) {
+	return c.control(ctx, http.MethodGet, "/venapce/examples/status", nil)
+}
+
+// LoadExamples asks Superset to load its example datasets/charts/dashboards in
+// the background (idempotent; 202 started, 200 already loaded, 409 in progress).
+func (c *Client) LoadExamples(ctx context.Context) (int, json.RawMessage, error) {
+	return c.control(ctx, http.MethodPost, "/venapce/examples/load", nil)
+}
+
+// control runs an authenticated request against a path OUTSIDE /api/v1 (the
+// Venapce blueprint), retrying once through a token refresh on 401.
+func (c *Client) control(ctx context.Context, method, path string, body any) (int, json.RawMessage, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return 0, nil, err
+	}
+	status, data, err := c.doControl(ctx, method, path, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	if status == http.StatusUnauthorized {
+		if err := c.refresh(ctx); err != nil {
+			return 0, nil, err
+		}
+		if status, data, err = c.doControl(ctx, method, path, body); err != nil {
+			return 0, nil, err
+		}
+	}
+	return status, json.RawMessage(data), nil
+}
+
+func (c *Client) doControl(ctx context.Context, method, path string, body any) (int, []byte, error) {
+	var r io.Reader
+	if body != nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, err
+		}
+		r = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, r)
+	if err != nil {
+		return 0, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	c.mu.Lock()
+	at, csrf := c.accessToken, c.csrfToken
+	c.mu.Unlock()
+	if at != "" {
+		req.Header.Set("Authorization", "Bearer "+at)
+	}
+	if csrf != "" && method != http.MethodGet {
+		req.Header.Set("X-CSRFToken", csrf)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, data, err
+}
+
 // ---- request plumbing ----
 
 // call runs an authenticated request, retrying once through a token refresh on 401.

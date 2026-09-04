@@ -41,6 +41,9 @@ func main() {
 	if err := srv.LoadSupersetFromDB(ctx); err != nil {
 		log.Printf("warning: could not load stored Superset settings: %v", err)
 	}
+	if err := srv.LoadOsctrlFromDB(ctx); err != nil {
+		log.Printf("warning: could not load stored osctrl settings: %v", err)
+	}
 
 	app := srv.App()
 	log.Printf("venapce-api listening on :%s", cfg.Port)

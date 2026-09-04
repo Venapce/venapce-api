@@ -69,6 +69,70 @@ func (s *Server) supersetDataset(c fiber.Ctx) error {
 	return writeRaw(c, raw)
 }
 
+// POST /api/superset/datasets — register a physical dataset (table) on an
+// existing Superset database connection. Body: {database, schema?, table_name}.
+func (s *Server) supersetCreateDataset(c fiber.Ctx) error {
+	cl, err := s.client(c)
+	if err != nil {
+		return err
+	}
+	var in struct {
+		Database  int    `json:"database"`
+		Schema    string `json:"schema"`
+		TableName string `json:"table_name"`
+	}
+	if err := json.Unmarshal(c.Body(), &in); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
+	}
+	if in.Database == 0 || in.TableName == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "database and table_name are required")
+	}
+	payload := map[string]any{"database": in.Database, "table_name": in.TableName}
+	if in.Schema != "" {
+		payload["schema"] = in.Schema
+	}
+	body, _ := json.Marshal(payload)
+	raw, err := cl.Post(c.Context(), "/dataset/", body)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadGateway, err.Error())
+	}
+	c.Status(fiber.StatusCreated)
+	return writeRaw(c, raw)
+}
+
+// GET /api/superset/databases/:id/schemas — schema names on a connection, for the
+// Add Dataset picker.
+func (s *Server) supersetDatabaseSchemas(c fiber.Ctx) error {
+	cl, err := s.client(c)
+	if err != nil {
+		return err
+	}
+	raw, err := cl.Result(c.Context(), "/database/"+c.Params("id")+"/schemas/?q=(force:!f)")
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadGateway, err.Error())
+	}
+	return writeRaw(c, raw)
+}
+
+// GET /api/superset/databases/:id/tables?schema= — tables in a schema, for the
+// Add Dataset picker.
+func (s *Server) supersetDatabaseTables(c fiber.Ctx) error {
+	cl, err := s.client(c)
+	if err != nil {
+		return err
+	}
+	q := "(force:!f"
+	if schema := c.Query("schema"); schema != "" {
+		q += ",schema_name:'" + risonEscape(schema) + "'"
+	}
+	q += ")"
+	raw, err := cl.Result(c.Context(), "/database/"+c.Params("id")+"/tables/?q="+url.QueryEscape(q))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadGateway, err.Error())
+	}
+	return writeRaw(c, raw)
+}
+
 // GET /api/superset/dashboards — Superset's own dashboards (metadata list).
 func (s *Server) supersetDashboards(c fiber.Ctx) error {
 	cl, err := s.client(c)

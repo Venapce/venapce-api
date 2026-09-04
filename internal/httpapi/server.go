@@ -17,6 +17,7 @@ import (
 	"github.com/Venapce/venapce-api/internal/config"
 	"github.com/Venapce/venapce-api/internal/cryptobox"
 	"github.com/Venapce/venapce-api/internal/db"
+	"github.com/Venapce/venapce-api/internal/osctrl"
 	"github.com/Venapce/venapce-api/internal/superset"
 )
 
@@ -24,6 +25,7 @@ type Server struct {
 	q   *db.Queries
 	box *cryptobox.Box
 	sup *superset.Manager
+	osc *osctrl.Manager
 	cfg config.Config
 }
 
@@ -32,6 +34,7 @@ func New(pool *pgxpool.Pool, box *cryptobox.Box, cfg config.Config) *Server {
 		q:   db.New(pool),
 		box: box,
 		sup: superset.NewManager(),
+		osc: osctrl.NewManager(),
 		cfg: cfg,
 	}
 }
@@ -60,11 +63,17 @@ func (s *Server) App() *fiber.App {
 	api.Get("/settings/superset", s.getSupersetSettings)
 	api.Put("/settings/superset", s.putSupersetSettings)
 	api.Post("/settings/superset/test", s.testSupersetSettings)
+	// On-demand demo data: load Superset's example datasets from the UI.
+	api.Get("/settings/superset/examples/status", s.getExamplesStatus)
+	api.Post("/settings/superset/examples", s.loadExamples)
 
 	// Server-side Superset data proxy (token stays here, never in the browser).
 	sup := api.Group("/superset")
 	sup.Get("/databases", s.supersetDatabases)
+	sup.Get("/databases/:id/schemas", s.supersetDatabaseSchemas)
+	sup.Get("/databases/:id/tables", s.supersetDatabaseTables)
 	sup.Get("/datasets", s.supersetDatasets)
+	sup.Post("/datasets", s.supersetCreateDataset)
 	sup.Get("/datasets/:id", s.supersetDataset)
 	sup.Get("/dashboards", s.supersetDashboards)
 	sup.Post("/chart/data", s.supersetChartData)
@@ -83,6 +92,23 @@ func (s *Server) App() *fiber.App {
 	api.Put("/dashboards/:id", s.updateDashboard)
 	api.Delete("/dashboards/:id", s.deleteDashboard)
 
+	// osctrl connection settings + proxy (backs the Nodes area; JWT stays here).
+	api.Get("/settings/osctrl", s.getOsctrlSettings)
+	api.Put("/settings/osctrl", s.putOsctrlSettings)
+	api.Post("/settings/osctrl/test", s.testOsctrlSettings)
+	osc := api.Group("/osctrl")
+	osc.Get("/environments", s.osctrlEnvironments)
+	osc.Get("/nodes", s.osctrlNodes)
+	osc.Get("/enroll", s.osctrlEnroll)
+
+	// Stage → Issues pipeline (rows produced/advanced by FloMorphic).
+	api.Get("/stage", s.listStage)
+	api.Post("/stage", s.createStage)
+	api.Post("/stage/:id/promote", s.promoteStage)
+	api.Get("/issues", s.listIssues)
+	api.Get("/issues/tags", s.issueTags)
+	api.Post("/issues", s.createIssue)
+
 	return app
 }
 
@@ -98,6 +124,20 @@ func (s *Server) LoadSupersetFromDB(ctx context.Context) error {
 		return err
 	}
 	s.sup.Set(superset.NewClient(cfg.URL, cfg.Username, pass))
+	return nil
+}
+
+// LoadOsctrlFromDB rebuilds the live osctrl client from stored settings on boot.
+func (s *Server) LoadOsctrlFromDB(ctx context.Context) error {
+	cfg, err := s.loadOsctrlConfig(ctx)
+	if err != nil || cfg == nil {
+		return err
+	}
+	pass, err := s.box.Decrypt(cfg.PasswordEnc)
+	if err != nil {
+		return err
+	}
+	s.osc.Set(osctrl.NewClient(cfg.URL, cfg.Username, pass, cfg.Environment))
 	return nil
 }
 
