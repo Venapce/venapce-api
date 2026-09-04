@@ -42,11 +42,18 @@ func (c *Client) Username() string    { return c.username }
 func (c *Client) Environment() string { return c.env }
 
 // EnrollValues is the assembled enrollment helper set the front renders. It is
-// built from several osctrl /enroll/{target} calls (each returns one string).
+// built from several osctrl /enroll/{target} and /remove/{target} calls (each
+// returns one string).
+//
+// osctrl gives an environment two independent links — enroll (install) and
+// remove (de-enroll) — each with its own secret path in the script URL. Whenever
+// an enroll one-liner exists a remove one-liner exists too, so both are always
+// assembled here; returning only OneLiner left the front's Remove tab empty.
 type EnrollValues struct {
-	Secret   string            `json:"secret"`
-	Flags    string            `json:"flags"`
-	OneLiner map[string]string `json:"oneLiner"`
+	Secret         string            `json:"secret"`
+	Flags          string            `json:"flags"`
+	OneLiner       map[string]string `json:"oneLiner"`
+	RemoveOneLiner map[string]string `json:"removeOneLiner"`
 }
 
 // ---- auth ----
@@ -120,25 +127,32 @@ func (c *Client) Nodes(ctx context.Context, env string) (json.RawMessage, error)
 }
 
 // Enroll assembles the enrollment helper values for an environment from osctrl's
-// per-target endpoints (secret, flags, and the sh/ps1 one-liners).
+// per-target endpoints (secret, flags, and the sh/ps1 one-liners for both the
+// enroll and the remove link).
 func (c *Client) Enroll(ctx context.Context, env string) (*EnrollValues, error) {
-	secret, err := c.enrollTarget(ctx, env, "secret")
+	secret, err := c.envTarget(ctx, env, "enroll", "secret")
 	if err != nil {
 		return nil, err
 	}
-	flags, _ := c.enrollTarget(ctx, env, "flags")
-	sh, _ := c.enrollTarget(ctx, env, "enroll.sh")
-	ps1, _ := c.enrollTarget(ctx, env, "enroll.ps1")
+	flags, _ := c.envTarget(ctx, env, "enroll", "flags")
+	sh, _ := c.envTarget(ctx, env, "enroll", "enroll.sh")
+	ps1, _ := c.envTarget(ctx, env, "enroll", "enroll.ps1")
+	// Linux and macOS share the shell one-liner; only Windows differs.
+	rmSh, _ := c.envTarget(ctx, env, "remove", "remove.sh")
+	rmPs1, _ := c.envTarget(ctx, env, "remove", "remove.ps1")
 	return &EnrollValues{
-		Secret:   secret,
-		Flags:    flags,
-		OneLiner: map[string]string{"linux": sh, "darwin": sh, "windows": ps1},
+		Secret:         secret,
+		Flags:          flags,
+		OneLiner:       map[string]string{"linux": sh, "darwin": sh, "windows": ps1},
+		RemoveOneLiner: map[string]string{"linux": rmSh, "darwin": rmSh, "windows": rmPs1},
 	}, nil
 }
 
-// enrollTarget fetches one enrollment value (osctrl returns { "data": "..." }).
-func (c *Client) enrollTarget(ctx context.Context, env, target string) (string, error) {
-	raw, err := c.getRaw(ctx, "/environments/"+env+"/enroll/"+target)
+// envTarget fetches one helper value for an environment link. `kind` selects the
+// osctrl endpoint family — "enroll" (secret, flags, enroll.sh, enroll.ps1) or
+// "remove" (remove.sh, remove.ps1). osctrl returns { "data": "..." }.
+func (c *Client) envTarget(ctx context.Context, env, kind, target string) (string, error) {
+	raw, err := c.getRaw(ctx, "/environments/"+env+"/"+kind+"/"+target)
 	if err != nil {
 		return "", err
 	}
@@ -153,7 +167,8 @@ func (c *Client) enrollTarget(ctx context.Context, env, target string) (string, 
 
 // ---- request plumbing ----
 
-// getRaw runs an authenticated GET, retrying once through a re-login on 401.
+// getRaw runs an authenticated GET, transparently re-logging in and retrying once
+// when the JWT has expired (osctrl answers 401, or 403 once the session times out).
 func (c *Client) getRaw(ctx context.Context, path string) (json.RawMessage, error) {
 	if err := c.ensureAuth(ctx); err != nil {
 		return nil, err
@@ -165,8 +180,10 @@ func (c *Client) getRaw(ctx context.Context, path string) (json.RawMessage, erro
 	if err != nil {
 		return nil, err
 	}
-	if status == http.StatusUnauthorized {
-		if err := c.login(ctx); err != nil {
+	if isAuthExpired(status) {
+		// Stale/expired token — drop it, re-login with the stored user/password,
+		// and replay the request once.
+		if err := c.reauth(ctx); err != nil {
 			return nil, err
 		}
 		c.mu.Lock()
@@ -180,6 +197,22 @@ func (c *Client) getRaw(ctx context.Context, path string) (json.RawMessage, erro
 		return nil, fmt.Errorf("osctrl GET %s: %d %s", path, status, truncate(data, 300))
 	}
 	return data, nil
+}
+
+// reauth clears the current token and performs a fresh login, so a retry after an
+// expired session never reuses the dead JWT.
+func (c *Client) reauth(ctx context.Context) error {
+	c.mu.Lock()
+	c.token = ""
+	c.mu.Unlock()
+	return c.login(ctx)
+}
+
+// isAuthExpired reports whether a response status means the session is no longer
+// valid and a re-login should be attempted: 401 (unauthorized) or 403 (osctrl
+// returns this once a JWT has expired).
+func isAuthExpired(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, token string) (int, []byte, error) {

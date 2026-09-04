@@ -119,6 +119,9 @@ func (s *Server) putSupersetSettings(c fiber.Ctx) error {
 	} else {
 		resp["connected"] = true
 		resp["connectedAs"] = who
+		// Now that we have a working connection, (re)wire the database + datasets
+		// in the background. Idempotent, so re-saving settings is safe.
+		s.StartSupersetProvisioning()
 	}
 	return c.JSON(resp)
 }

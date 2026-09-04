@@ -45,6 +45,10 @@ func main() {
 		log.Printf("warning: could not load stored osctrl settings: %v", err)
 	}
 
+	// Lazily wire Superset (register the venapce Postgres + data-table datasets)
+	// in the background so it never delays the listener; progress goes to the log.
+	srv.StartSupersetProvisioning()
+
 	app := srv.App()
 	log.Printf("venapce-api listening on :%s", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {
