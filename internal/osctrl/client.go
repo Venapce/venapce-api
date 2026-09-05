@@ -52,8 +52,33 @@ func (c *Client) Environment() string { return c.env }
 type EnrollValues struct {
 	Secret         string            `json:"secret"`
 	Flags          string            `json:"flags"`
+	Certificate    string            `json:"certificate,omitempty"`
 	OneLiner       map[string]string `json:"oneLiner"`
 	RemoveOneLiner map[string]string `json:"removeOneLiner"`
+	Hostname       string            `json:"hostname,omitempty"`
+	EnvUUID        string            `json:"envUUID,omitempty"`
+	Enroll         *LinkState        `json:"enroll,omitempty"`
+	Remove         *LinkState        `json:"remove,omitempty"`
+}
+
+// LinkState is the live state of an enroll/remove link, mirroring osctrl's
+// per-environment expiry. Enabled is false once expired; Expires is nil when the
+// link never expires (osctrl stores the zero time for that).
+type LinkState struct {
+	Enabled bool       `json:"enabled"`
+	Expires *time.Time `json:"expires,omitempty"`
+	Path    string     `json:"path,omitempty"`
+}
+
+// linkState builds a LinkState from an osctrl expiry + secret path, matching
+// osctrl's IsItExpired rule (zero time = never expires = still enabled).
+func linkState(expire time.Time, path string) *LinkState {
+	s := &LinkState{Enabled: expire.IsZero() || expire.After(time.Now()), Path: path}
+	if !expire.IsZero() {
+		e := expire
+		s.Expires = &e
+	}
+	return s
 }
 
 // ---- auth ----
@@ -140,12 +165,60 @@ func (c *Client) Enroll(ctx context.Context, env string) (*EnrollValues, error) 
 	// Linux and macOS share the shell one-liner; only Windows differs.
 	rmSh, _ := c.envTarget(ctx, env, "remove", "remove.sh")
 	rmPs1, _ := c.envTarget(ctx, env, "remove", "remove.ps1")
-	return &EnrollValues{
+	vals := &EnrollValues{
 		Secret:         secret,
 		Flags:          flags,
 		OneLiner:       map[string]string{"linux": sh, "darwin": sh, "windows": ps1},
 		RemoveOneLiner: map[string]string{"linux": rmSh, "darwin": rmSh, "windows": rmPs1},
-	}, nil
+	}
+	// Fold in live link state (expiry/enabled/path) and identity from the
+	// environment record, so the front can show whether each link is active.
+	if rec, err := c.environment(ctx, env); err == nil {
+		vals.Certificate = rec.Certificate
+		vals.Hostname = rec.Hostname
+		vals.EnvUUID = rec.UUID
+		vals.Enroll = linkState(rec.EnrollExpire, rec.EnrollSecretPath)
+		vals.Remove = linkState(rec.RemoveExpire, rec.RemoveSecretPath)
+	}
+	return vals, nil
+}
+
+// envRecord is the subset of osctrl's environment record the enroll view needs.
+type envRecord struct {
+	UUID             string    `json:"uuid"`
+	Hostname         string    `json:"hostname"`
+	Certificate      string    `json:"certificate"`
+	EnrollSecretPath string    `json:"enroll_secret_path"`
+	EnrollExpire     time.Time `json:"enroll_expire"`
+	RemoveSecretPath string    `json:"remove_secret_path"`
+	RemoveExpire     time.Time `json:"remove_expire"`
+}
+
+// environment fetches one environment record (admin view, so it carries the
+// secret paths and expiry the enroll view renders).
+func (c *Client) environment(ctx context.Context, env string) (*envRecord, error) {
+	raw, err := c.getRaw(ctx, "/environments/"+env)
+	if err != nil {
+		return nil, err
+	}
+	var rec envRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// EnrollAction runs a lifecycle action on an environment's enroll link. `action`
+// is one of extend, expire, rotate, notexpire — osctrl mutates the enroll secret
+// and returns { "message": "..." }. Always hits osctrl live (no cache); the JWT is
+// injected here so it never reaches the browser.
+func (c *Client) EnrollAction(ctx context.Context, env, action string) (json.RawMessage, error) {
+	return c.postRaw(ctx, "/environments/"+env+"/enroll/"+action, map[string]any{})
+}
+
+// RemoveAction is EnrollAction for the environment's remove link.
+func (c *Client) RemoveAction(ctx context.Context, env, action string) (json.RawMessage, error) {
+	return c.postRaw(ctx, "/environments/"+env+"/remove/"+action, map[string]any{})
 }
 
 // envTarget fetches one helper value for an environment link. `kind` selects the
@@ -195,6 +268,36 @@ func (c *Client) getRaw(ctx context.Context, path string) (json.RawMessage, erro
 	}
 	if status >= 400 {
 		return nil, fmt.Errorf("osctrl GET %s: %d %s", path, status, truncate(data, 300))
+	}
+	return data, nil
+}
+
+// postRaw runs an authenticated POST with the same expired-token reauth-and-retry
+// behaviour as getRaw. Used for the enroll/remove lifecycle actions.
+func (c *Client) postRaw(ctx context.Context, path string, body any) (json.RawMessage, error) {
+	if err := c.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	tok := c.token
+	c.mu.Unlock()
+	status, data, err := c.do(ctx, http.MethodPost, path, body, tok)
+	if err != nil {
+		return nil, err
+	}
+	if isAuthExpired(status) {
+		if err := c.reauth(ctx); err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		tok = c.token
+		c.mu.Unlock()
+		if status, data, err = c.do(ctx, http.MethodPost, path, body, tok); err != nil {
+			return nil, err
+		}
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("osctrl POST %s: %d %s", path, status, truncate(data, 300))
 	}
 	return data, nil
 }

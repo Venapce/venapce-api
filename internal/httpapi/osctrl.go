@@ -207,3 +207,56 @@ func (s *Server) osctrlEnroll(c fiber.Ctx) error {
 	}
 	return c.JSON(values)
 }
+
+// osctrlActions is the set of enroll/remove lifecycle actions osctrl accepts.
+var osctrlActions = map[string]bool{"extend": true, "expire": true, "rotate": true, "notexpire": true}
+
+type osctrlActionBody struct {
+	Env    string `json:"env"`
+	Target string `json:"target"` // "enroll" or "remove"
+	Action string `json:"action"` // extend | expire | rotate | notexpire (osctrl uses a fixed extend period)
+}
+
+// POST /api/osctrl/enroll/actions — mutate an environment's enroll or remove link
+// (rotate/extend/expire/notexpire) and return the refreshed enroll values so the
+// page reflects the new state. The JWT is injected in the backend; osctrl is
+// always the source of truth (no caching).
+func (s *Server) osctrlEnrollAction(c fiber.Ctx) error {
+	cl, err := s.osctrlClient()
+	if err != nil {
+		return err
+	}
+	var body osctrlActionBody
+	if err := c.Bind().Body(&body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
+	}
+	env := body.Env
+	if env == "" {
+		env = cl.Environment()
+	}
+	if env == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "env is required")
+	}
+	if !osctrlActions[body.Action] {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid action — one of: extend, expire, rotate, notexpire")
+	}
+
+	switch body.Target {
+	case "enroll", "":
+		_, err = cl.EnrollAction(c.Context(), env, body.Action)
+	case "remove":
+		_, err = cl.RemoveAction(c.Context(), env, body.Action)
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, "invalid target — enroll or remove")
+	}
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadGateway, err.Error())
+	}
+
+	// Re-fetch so the response carries the post-action enroll values.
+	values, err := cl.Enroll(c.Context(), env)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadGateway, err.Error())
+	}
+	return c.JSON(values)
+}

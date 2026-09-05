@@ -100,6 +100,7 @@ func (s *Server) App() *fiber.App {
 	osc.Get("/environments", s.osctrlEnvironments)
 	osc.Get("/nodes", s.osctrlNodes)
 	osc.Get("/enroll", s.osctrlEnroll)
+	osc.Post("/enroll/actions", s.osctrlEnrollAction)
 
 	// Stage → Issues pipeline (rows produced/advanced by FloMorphic).
 	api.Get("/stage", s.listStage)
