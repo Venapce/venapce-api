@@ -137,6 +137,7 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 		job.DoneWithError("collecting results failed: " + err.Error())
 		return
 	}
+	decodeRowData(res.Items)
 
 	out := map[string]any{
 		"queryName": name,
@@ -288,6 +289,25 @@ func envOptions(raw json.RawMessage) []formkit.Option {
 		options = append(options, formkit.Option{Value: name, Label: label})
 	}
 	return options
+}
+
+// decodeRowData unwraps each result row's osctrl-encoded "data" field. osctrl
+// stores the osquery result envelope ({"name","result":[…],"status","message"})
+// as a JSON *string*, so a raw row carries it as an opaque string that downstream
+// flow nodes cannot index into. Where "data" is a string holding valid JSON, it
+// is replaced in place with the decoded value so the row presents as structured
+// JSON. A non-string or non-JSON "data" is left untouched.
+func decodeRowData(rows []map[string]any) {
+	for _, row := range rows {
+		s, ok := row["data"].(string)
+		if !ok {
+			continue
+		}
+		var decoded any
+		if json.Unmarshal([]byte(s), &decoded) == nil {
+			row["data"] = decoded
+		}
+	}
 }
 
 // columnsOf collects the union of keys across result rows, so downstream nodes

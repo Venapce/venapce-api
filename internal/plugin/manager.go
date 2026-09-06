@@ -14,6 +14,7 @@ import (
 	natsHandler "github.com/Inflowenger/go-plugin-sdk/nats"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 	"github.com/jackc/pgx/v5/pgxpool"
+	nats "github.com/nats-io/nats.go"
 
 	"github.com/Venapce/venapce-api/internal/osctrl"
 )
@@ -67,15 +68,34 @@ func NewManager(pool *pgxpool.Pool, osc *osctrl.Manager) *Manager {
 
 // Status is the public-safe view of the plugin's state, for the settings API.
 type Status struct {
-	Running  bool   `json:"running"`
-	PluginID string `json:"pluginId,omitempty"`
-	Error    string `json:"error,omitempty"`
+	// Running is the latched flag: we started the plugin and hold its connection.
+	// It stays true across a transient infra blip and does NOT reflect the live
+	// socket — use Connected/ConnState for that.
+	Running bool `json:"running"`
+	// Connected is a live probe of the underlying NATS connection to infra,
+	// evaluated at each Status() call. False means the socket is down/closed even
+	// though we still hold the plugin. Note: this reflects the infra link only —
+	// removing the plugin's palette row in FloMorphic does not drop this link, so
+	// it stays true until infra is unreachable or the credential is revoked.
+	Connected bool `json:"connected"`
+	// ConnState is the human-readable NATS connection state ("CONNECTED",
+	// "RECONNECTING", "CLOSED", "DISCONNECTED", or "unknown"/"none").
+	ConnState string `json:"connState,omitempty"`
+	PluginID  string `json:"pluginId,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Status{Running: m.running, PluginID: m.pluginID, Error: m.lastErr}
+	connected, state := connState(m.current)
+	return Status{
+		Running:   m.running,
+		Connected: connected,
+		ConnState: state,
+		PluginID:  m.pluginID,
+		Error:     m.lastErr,
+	}
 }
 
 // Start connects the plugin to infra with the given env and subscribes its
@@ -155,27 +175,55 @@ func natsURL(infraURL string) (string, error) {
 	return "nats://" + u.Host, nil
 }
 
-// drainPlugin closes the NATS connection behind a plugin so its subscriptions are
-// released on restart. The SDK (go-plugin-sdk v0.1.7) offers no Close/Drain and
-// keeps its *nats.Conn unexported, so this reaches the connection through the one
-// exported method on the connector and drains it. It is strictly best effort:
-// any failure (a changed SDK field, a nil connection) is swallowed, because a
-// leaked connection until the next process restart is a lesser evil than a panic.
-func drainPlugin(p *sdkv1.Plugin) {
-	defer func() { _ = recover() }()
+// connState live-probes the NATS connection behind a plugin and reports whether
+// it is connected plus its state name. It reaches the connection through the same
+// (unexported) path as drainPlugin, so it is strictly best effort: any failure
+// (a changed SDK field, a nil connection) yields (false, "unknown") rather than a
+// panic. Returns (false, "none") when no plugin is held.
+func connState(p *sdkv1.Plugin) (connected bool, state string) {
+	defer func() {
+		if recover() != nil {
+			connected, state = false, "unknown"
+		}
+	}()
+	nc := liveConn(p)
+	if nc == nil {
+		if p == nil {
+			return false, "none"
+		}
+		return false, "unknown"
+	}
+	return nc.IsConnected(), nc.Status().String()
+}
+
+// liveConn extracts the *nats.Conn behind a plugin via reflection (the SDK keeps
+// its connector unexported). Shared by connState and drainPlugin. Returns nil on
+// any mismatch.
+func liveConn(p *sdkv1.Plugin) *nats.Conn {
 	if p == nil {
-		return
+		return nil
 	}
 	field := reflect.ValueOf(p).Elem().FieldByName("infraConn")
 	if !field.IsValid() || field.Kind() != reflect.Pointer || field.IsNil() {
-		return
+		return nil
 	}
 	conn, ok := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).
 		Elem().Interface().(*natsHandler.Nats)
 	if !ok || conn == nil {
-		return
+		return nil
 	}
-	if nc := conn.GetConnection(); nc != nil {
+	return conn.GetConnection()
+}
+
+// drainPlugin closes the NATS connection behind a plugin so its subscriptions are
+// released on restart. The SDK (go-plugin-sdk) offers no Close/Drain and keeps its
+// *nats.Conn unexported, so this reaches the connection through liveConn and
+// drains it. It is strictly best effort: any failure (a changed SDK field, a nil
+// connection) is swallowed, because a leaked connection until the next process
+// restart is a lesser evil than a panic.
+func drainPlugin(p *sdkv1.Plugin) {
+	defer func() { _ = recover() }()
+	if nc := liveConn(p); nc != nil {
 		_ = nc.Drain()
 	}
 }

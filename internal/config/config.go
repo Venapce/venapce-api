@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -8,6 +9,10 @@ import (
 
 	"github.com/joho/godotenv"
 )
+
+// infraNatsPort is the NATS port infra serves plugins on. The osspace HTTP API
+// (:8022) is derived from the same host on the venapce side (see deriveInfraBase).
+const infraNatsPort = "4222"
 
 // Config is the process configuration, all sourced from the environment so the
 // same binary runs in the deploy compose (DATABASE_URL=...@postgres:5432/venapce)
@@ -17,6 +22,22 @@ type Config struct {
 	DatabaseURL string
 	AppSecret   string // key material for encrypting stored secrets (Superset password)
 	CORSOrigins string // comma-separated allowed origins for the browser front
+
+	// FloMorphic API access. Venapce runs as a FloMorphic plugin; rather than the
+	// operator pasting a plugin env, the backend calls the FloMorphic API to mint
+	// its own runtime credential (POST /extension/plugin/cred). FlomorphicURL is
+	// the FloMorphic API base; FlomorphicJWTSecret is the HS256 secret the backend
+	// signs an admin bearer token with. Both must be set for the plugin flow.
+	FlomorphicURL       string
+	FlomorphicJWTSecret string
+
+	// InfraHost is the hostname of the infra service. In the deploy compose it is
+	// the infra container name; in local dev the developer sets it. Venapce uses it
+	// for both infra ports: the plugin connects to NATS on :4222, and osctrl-space
+	// requests hit the osspace HTTP API on :8022 (derived from the same host). It is
+	// passed as INFRA_URL when minting the plugin credential, so the minted env
+	// carries the host venapce can actually reach infra on.
+	InfraHost string
 
 	// Superset provisioning: on boot we lazily register the venapce Postgres as a
 	// Superset database connection and add the data tables (stage, issues) as
@@ -36,6 +57,23 @@ type Config struct {
 	SupersetURL       string // internal Superset base URL, e.g. http://superset:8088
 	SupersetAdminUser string
 	SupersetAdminPass string
+}
+
+// FlomorphicConfigured reports whether the environment specifies the FloMorphic
+// API access needed to mint a plugin credential (URL + signing secret).
+func (c Config) FlomorphicConfigured() bool {
+	return c.FlomorphicURL != "" && c.FlomorphicJWTSecret != ""
+}
+
+// InfraNatsURL is the plugin's INFRA_URL built from InfraHost — nats://host:4222.
+// Passed as an INFRA_URL extra when minting the plugin credential so the returned
+// env points the plugin (and, via deriveInfraBase, osspace) at the reachable host.
+// Empty when InfraHost is unset.
+func (c Config) InfraNatsURL() string {
+	if c.InfraHost == "" {
+		return ""
+	}
+	return "nats://" + net.JoinHostPort(c.InfraHost, infraNatsPort)
 }
 
 // SupersetManaged reports whether the environment fully specifies the built-in
@@ -80,6 +118,11 @@ func Load() Config {
 		DatabaseURL: databaseURL,
 		AppSecret:   env("APP_SECRET_KEY", "dev-insecure-change-me"),
 		CORSOrigins: env("CORS_ORIGINS", "http://localhost:5173"),
+
+		FlomorphicURL:       strings.TrimRight(env("FLOMORPHIC_URL", ""), "/"),
+		FlomorphicJWTSecret: env("FLOMORPHIC_JWT_SECRET", ""),
+
+		InfraHost: env("INFRA_HOST", "infra"),
 
 		SupersetDBName: env("SUPERSET_DB_NAME", "Venapce"),
 		SupersetSchema: env("SUPERSET_SCHEMA", "public"),

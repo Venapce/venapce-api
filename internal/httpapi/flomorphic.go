@@ -15,14 +15,17 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Venapce/venapce-api/internal/db"
+	"github.com/Venapce/venapce-api/internal/flomorphic"
+	"github.com/Venapce/venapce-api/internal/osctrl"
 	"github.com/Venapce/venapce-api/internal/plugin"
 )
 
 // Venapce runs as a FloMorphic plugin: all business logic lives in FloMorphic
 // workflows, and turnkey osctrl access is brokered by FloMorphic's `infra`. The
-// operator defines a "venapce" plugin in the FloMorphic panel and pastes its
-// plugin env here; we keep what we need and use INFRA_URL's host to drive
-// infra's existing osspace flow (Google OAuth -> a provisioned osctrl space).
+// backend mints its own plugin credential from the FloMorphic API
+// (FLOMORPHIC_URL + FLOMORPHIC_JWT_SECRET) and stores the returned plugin env; we
+// keep what we need and use INFRA_URL's host to drive infra's existing osspace
+// flow (Google OAuth -> a provisioned osctrl space).
 const flomorphicSettingKey = "flomorphic"
 
 // infraOsspacePort is the HTTP port infra serves its license/command API on. The
@@ -33,6 +36,11 @@ const infraOsspacePort = "8022"
 // flomorphicConfig is the persisted plugin registration. INFRA_CRED is stored
 // only as ciphertext; the rest is public-safe.
 type flomorphicConfig struct {
+	// ExtensionID is the FloMorphic extension row id — what we sync (build palette
+	// nodes) and delete (refresh) against. FloMorphic assigns it on create.
+	ExtensionID string `json:"extension_id,omitempty"`
+	// PluginID is the inflowv1 identity FloMorphic assigned that row (name-<uuid>);
+	// the plugin connects as it and the credential is scoped to it.
 	PluginID    string `json:"plugin_id"`
 	InfraURLRaw string `json:"infra_url_raw"` // the plugin's INFRA_URL (nats://host:4222)
 	InfraBase   string `json:"infra_base"`    // derived http://host:8022
@@ -63,8 +71,19 @@ func (s *Server) getFlomorphicSettings(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	// Surface the env-sourced FloMorphic API config (FLOMORPHIC_URL +
+	// FLOMORPHIC_JWT_SECRET) so the Settings card can show the URL and whether the
+	// signing secret is set, and offer "connect" without asking the operator to
+	// paste anything. The secret value itself is never returned. apiConfigured is
+	// true only when both are present (== a usable client).
+	apiInfo := fiber.Map{
+		"apiConfigured": s.flo != nil,
+		"apiUrl":        s.cfg.FlomorphicURL,
+		"jwtSecretSet":  s.cfg.FlomorphicJWTSecret != "",
+	}
 	if cfg == nil {
-		return c.JSON(fiber.Map{"configured": false})
+		apiInfo["configured"] = false
+		return c.JSON(apiInfo)
 	}
 	// Surface whether a managed osctrl space is already wired up, so the card can
 	// show "connected" without a second round-trip.
@@ -72,35 +91,134 @@ func (s *Server) getFlomorphicSettings(c fiber.Ctx) error {
 	if oc, _ := s.loadOsctrlConfig(c.Context()); oc != nil {
 		osctrlManaged = oc.Managed
 	}
-	return c.JSON(fiber.Map{
-		"configured":    true,
-		"pluginId":      cfg.PluginID,
-		"infraBase":     cfg.InfraBase,
-		"osctrlManaged": osctrlManaged,
-		"plugin":        s.plg.Status(),
-	})
+	apiInfo["configured"] = true
+	apiInfo["extensionId"] = cfg.ExtensionID
+	apiInfo["pluginId"] = cfg.PluginID
+	apiInfo["infraBase"] = cfg.InfraBase
+	apiInfo["osctrlManaged"] = osctrlManaged
+	apiInfo["plugin"] = s.plg.Status()
+	return c.JSON(apiInfo)
 }
 
-type putFlomorphicBody struct {
-	Env string `json:"env"` // the pasted plugin env block (KEY=VALUE lines)
-}
+// defaultPluginName / defaultPluginDescription label venapce's palette extension
+// in FloMorphic. The name is a prefix of the assigned plugin id; the description
+// shows on the extension card.
+const (
+	defaultPluginName        = "venapce"
+	defaultPluginDescription = "Venapce — osquery + data nodes"
+)
 
-// PUT /api/settings/flomorphic — register the FloMorphic plugin from its pasted
-// env. We parse PLUGIN_ID / INFRA_CRED / INFRA_URL, derive the infra HTTP base,
-// and store it (INFRA_CRED encrypted).
+// PUT /api/settings/flomorphic — register venapce as a FloMorphic plugin and make
+// its nodes available in the canvas palette. The full lifecycle is driven here:
+// ensure the extension row exists (FloMorphic assigns its plugin id), mint a
+// credential for that id, connect the in-process plugin, then sync its actions
+// into palette nodes. Reuses the stored row on repeat calls.
 func (s *Server) putFlomorphicSettings(c fiber.Ctx) error {
-	var body putFlomorphicBody
-	if err := c.Bind().Body(&body); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
+	if s.flo == nil {
+		return fiber.NewError(fiber.StatusBadRequest, "FloMorphic API is not configured — set FLOMORPHIC_URL and FLOMORPHIC_JWT_SECRET")
 	}
-	env := parsePluginEnv(body.Env)
+	return s.registerPlugin(c, false)
+}
+
+// POST /api/settings/flomorphic/plugin/refresh — redefine venapce in FloMorphic:
+// delete the existing extension row (and its synced nodes), then register afresh
+// (new row + plugin id + credential) and re-sync. This is the "clear and re-add"
+// path for picking up a changed action set.
+func (s *Server) refreshVenapcePlugin(c fiber.Ctx) error {
+	if s.flo == nil {
+		return fiber.NewError(fiber.StatusBadRequest, "FloMorphic API is not configured — set FLOMORPHIC_URL and FLOMORPHIC_JWT_SECRET")
+	}
+	return s.registerPlugin(c, true)
+}
+
+// registerPlugin ensures venapce is registered as a FloMorphic extension, its
+// plugin connected, and its palette nodes synced. When recreate is true it first
+// deletes the stored extension row so a brand-new one (and plugin id) is issued.
+func (s *Server) registerPlugin(c fiber.Ctx, recreate bool) error {
+	ctx := c.Context()
+	existing, err := s.loadFlomorphicConfig(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Refresh = clear the old row (takes its synced nodes with it) so we register
+	// clean. Best effort: a missing row is fine, and a delete failure still lets us
+	// try to create a new one.
+	if recreate && existing != nil && existing.ExtensionID != "" {
+		if err := s.flo.DeleteExtension(ctx, existing.ExtensionID); err != nil {
+			return fiber.NewError(fiber.StatusBadGateway, "delete existing FloMorphic extension: "+err.Error())
+		}
+		existing = nil
+	}
+
+	// Reuse the stored row when we have one, else register a new extension. The
+	// plugin id comes from FloMorphic (it ignores any we'd send), so it is the
+	// row's assigned id in both cases.
+	extID, pluginID := "", ""
+	if existing != nil {
+		extID, pluginID = existing.ExtensionID, existing.PluginID
+	}
+	if extID == "" || pluginID == "" {
+		ext, err := s.flo.CreateExtension(ctx, defaultPluginName, defaultPluginDescription)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadGateway, "register extension in FloMorphic: "+err.Error())
+		}
+		extID, pluginID = ext.ID, ext.PluginID
+	}
+
+	// Mint a credential for the assigned plugin id, pointing INFRA_URL at the host
+	// venapce can actually reach (INFRA_HOST); FloMorphic's env renderer lets a
+	// declared INFRA_URL win, and deriveInfraBase yields the matching osspace base.
+	var extra []flomorphic.EnvVar
+	if url := s.cfg.InfraNatsURL(); url != "" {
+		extra = append(extra, flomorphic.EnvVar{Key: "INFRA_URL", Value: url})
+	}
+	envText, _, err := s.flo.MintPluginEnv(ctx, pluginID, extra)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadGateway, "mint plugin credential from FloMorphic: "+err.Error())
+	}
+
+	// Persist the registration (INFRA_CRED encrypted) and connect the plugin.
+	if err := s.storePluginEnv(ctx, extID, envText); err != nil {
+		return err
+	}
+
+	resp := fiber.Map{"configured": true, "extensionId": extID, "pluginId": pluginID}
+	if err := s.startVenapcePlugin(ctx); err != nil {
+		// Without a connected plugin there is nothing for FloMorphic to sync, so
+		// stop here and report — the registration is saved and can be retried.
+		resp["pluginError"] = err.Error()
+		resp["plugin"] = s.plg.Status()
+		return c.JSON(resp)
+	}
+
+	// Build the palette nodes from the now-connected plugin's @actions. The plugin
+	// has just connected, so FloMorphic may need a moment to reach it — retry a few
+	// times before giving up.
+	sync, err := s.syncWithRetry(ctx, extID)
+	if err != nil {
+		resp["syncError"] = err.Error()
+	} else {
+		resp["nodes"] = sync.Added
+	}
+	resp["plugin"] = s.plg.Status()
+	if probe := s.pluginProbe(ctx, extID); probe != nil {
+		resp["probe"] = probe
+	}
+	return c.JSON(resp)
+}
+
+// storePluginEnv parses a minted plugin dotenv and persists it as the registration
+// (INFRA_CRED encrypted, extension id kept for sync/delete).
+func (s *Server) storePluginEnv(ctx context.Context, extID, envText string) error {
+	env := parsePluginEnv(envText)
 	infraURL := env["INFRA_URL"]
 	if infraURL == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "INFRA_URL missing from the plugin env — copy the full plugin env from the FloMorphic panel")
+		return fiber.NewError(fiber.StatusBadGateway, "FloMorphic returned a plugin env with no INFRA_URL")
 	}
 	infraBase, err := deriveInfraBase(infraURL)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "could not read a host from INFRA_URL: "+err.Error())
+		return fiber.NewError(fiber.StatusBadGateway, "could not read a host from INFRA_URL: "+err.Error())
 	}
 
 	credEnc := ""
@@ -108,11 +226,12 @@ func (s *Server) putFlomorphicSettings(c fiber.Ctx) error {
 		if credEnc, err = s.box.Encrypt(cred); err != nil {
 			return err
 		}
-	} else if existing, _ := s.loadFlomorphicConfig(c.Context()); existing != nil {
-		credEnc = existing.InfraCredEnc // keep the previous cred if the paste omits it
+	} else if existing, _ := s.loadFlomorphicConfig(ctx); existing != nil {
+		credEnc = existing.InfraCredEnc // keep the previous cred if the mint omits it
 	}
 
 	cfg := flomorphicConfig{
+		ExtensionID:  extID,
 		PluginID:     env["PLUGIN_ID"],
 		InfraURLRaw:  infraURL,
 		InfraBase:    infraBase,
@@ -122,20 +241,63 @@ func (s *Server) putFlomorphicSettings(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.q.UpsertSetting(c.Context(), db.UpsertSettingParams{Key: flomorphicSettingKey, Value: value}); err != nil {
+	if _, err := s.q.UpsertSetting(ctx, db.UpsertSettingParams{Key: flomorphicSettingKey, Value: value}); err != nil {
 		return err
 	}
+	return nil
+}
 
-	// Pasting the plugin env is exactly the "run/restart the plugin" trigger: use
-	// the just-saved env to (re)connect the in-process plugin to infra. A failure
-	// here (infra unreachable, etc.) is reported on the response, not fatal — the
-	// registration is saved and the plugin can be retried from the restart route.
-	resp := fiber.Map{"configured": true, "pluginId": cfg.PluginID, "infraBase": cfg.InfraBase}
-	if err := s.startVenapcePlugin(c.Context()); err != nil {
-		resp["pluginError"] = err.Error()
+// syncWithRetry asks FloMorphic to sync the plugin's actions into palette nodes,
+// retrying briefly because the plugin has just (re)connected and FloMorphic's
+// live @actions probe can race the subscription coming up.
+func (s *Server) syncWithRetry(ctx context.Context, extID string) (flomorphic.SyncResult, error) {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return flomorphic.SyncResult{}, ctx.Err()
+			case <-time.After(600 * time.Millisecond):
+			}
+		}
+		res, err := s.flo.SyncExtension(ctx, extID)
+		if err == nil {
+			return res, nil
+		}
+		lastErr = err
 	}
-	resp["plugin"] = s.plg.Status()
-	return c.JSON(resp)
+	return flomorphic.SyncResult{}, lastErr
+}
+
+// pluginProbe reports the plugin's connectivity as FloMorphic sees it — the
+// authoritative reference — by asking FloMorphic to reach the plugin over
+// inflowv1 (@actions). It is best effort with a short timeout and returns nil when
+// there is no extension row to probe.
+func (s *Server) pluginProbe(ctx context.Context, extID string) fiber.Map {
+	if s.flo == nil || strings.TrimSpace(extID) == "" {
+		return nil
+	}
+	pctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	actions, err := s.flo.ProbeExtension(pctx, extID)
+	if err != nil {
+		return fiber.Map{"reachable": false, "error": err.Error()}
+	}
+	return fiber.Map{"reachable": true, "actions": actions}
+}
+
+// POST /api/settings/flomorphic/plugin/check — report the plugin's connectivity
+// as FloMorphic sees it (a live @actions round-trip through FloMorphic).
+func (s *Server) checkVenapcePlugin(c fiber.Ctx) error {
+	cfg, err := s.loadFlomorphicConfig(c.Context())
+	if err != nil {
+		return err
+	}
+	if cfg == nil || cfg.ExtensionID == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "venapce is not registered in FloMorphic yet — connect first")
+	}
+	probe := s.pluginProbe(c.Context(), cfg.ExtensionID)
+	return c.JSON(fiber.Map{"probe": probe, "plugin": s.plg.Status()})
 }
 
 // pluginEnv assembles the plugin connection env from the stored FloMorphic
@@ -189,7 +351,7 @@ func (s *Server) restartVenapcePlugin(c fiber.Ctx) error {
 		return err
 	}
 	if !ok {
-		return fiber.NewError(fiber.StatusBadRequest, "no plugin env stored — paste the FloMorphic plugin env in Settings first")
+		return fiber.NewError(fiber.StatusBadRequest, "no plugin env stored — connect FloMorphic in Settings first")
 	}
 	if err := s.plg.Start(env); err != nil {
 		return c.JSON(fiber.Map{"restarted": false, "plugin": s.plg.Status(), "error": err.Error()})
@@ -213,17 +375,42 @@ func (s *Server) connectOsspace(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "FloMorphic is not connected — register the plugin env first")
 	}
 
+	// Idempotent by design: an osctrl space is provisioned once per inflowenger
+	// license (infra keys the space off the license ID carried in the plugin env),
+	// so there is never a second space to create. Once we've wired one up, a repeat
+	// "connect" click must NOT re-enter infra's osspace/OAuth flow — that would send
+	// the operator back through Google sign-in and leave the front polling forever
+	// for a space they already own. Re-probe the stored space and return it as the
+	// latest registered one.
+	if oc, _ := s.loadOsctrlConfig(c.Context()); oc != nil && oc.Managed {
+		return s.reportManagedOsspace(c, oc)
+	}
+
 	res, err := fetchOsspace(c.Context(), cfg.InfraBase)
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadGateway, err.Error())
 	}
+
+	// When a space already exists for this license (an installed instance whose
+	// space was created earlier), infra hands back the credentials immediately —
+	// often alongside a `redirect` to the space's own page. A present space always
+	// wins over that redirect: there is nothing left to provision, so wire it up as
+	// connected instead of sending the front into a polling loop against the
+	// redirect. Only fall through to `pending` when infra gave us no usable space.
+	if res.Hostname != "" && res.Username != "" && res.Password != "" {
+		return s.wireOsspace(c, res)
+	}
 	if res.Redirect != "" {
 		return c.JSON(fiber.Map{"status": "pending", "redirect": res.Redirect})
 	}
-	if res.Hostname == "" || res.Username == "" || res.Password == "" || res.Environment == "" {
-		return fiber.NewError(fiber.StatusBadGateway, "infra returned an incomplete osctrl space")
-	}
+	return fiber.NewError(fiber.StatusBadGateway, "infra returned an incomplete osctrl space")
+}
 
+// wireOsspace persists a space infra returned as a managed osctrl connection,
+// probes its login, and reports it as connected. Split out of connectOsspace so
+// the "space returned directly" path is shared regardless of whether infra also
+// sent a redirect.
+func (s *Server) wireOsspace(c fiber.Ctx, res *osspaceResult) error {
 	// osctrl exposes its API on the space host; the client appends /api/v1.
 	osctrlURL := "https://" + res.Hostname
 	who, err := s.saveManagedOsctrl(c.Context(), osctrlURL, res.Username, res.Password, res.Environment)
@@ -245,6 +432,34 @@ func (s *Server) connectOsspace(c fiber.Ctx) error {
 		"connected":   true,
 		"connectedAs": who,
 	})
+}
+
+// reportManagedOsspace re-probes an osctrl space that was already provisioned for
+// this license and returns it in the same shape as a fresh osspace connect, so a
+// repeat "connect" click resolves to an immediate success instead of kicking off
+// a new provisioning/OAuth round. It rebuilds the live client from the stored
+// (encrypted) credentials rather than re-fetching from infra.
+func (s *Server) reportManagedOsspace(c fiber.Ctx, cfg *osctrlConfig) error {
+	pass, err := s.box.Decrypt(cfg.PasswordEnc)
+	if err != nil {
+		return err
+	}
+	client := osctrl.NewClient(cfg.URL, cfg.Username, pass, cfg.Environment)
+	s.osc.Set(client)
+
+	resp := fiber.Map{
+		"status":      "connected",
+		"environment": cfg.Environment,
+		"hostname":    strings.TrimPrefix(strings.TrimPrefix(cfg.URL, "https://"), "http://"),
+	}
+	if who, err := client.TestLogin(c.Context()); err != nil {
+		resp["connected"] = false
+		resp["connectionError"] = err.Error()
+	} else {
+		resp["connected"] = true
+		resp["connectedAs"] = who
+	}
+	return c.JSON(resp)
 }
 
 // osspaceResult is the flattened outcome of a /lc/cmd/osspace call: either a

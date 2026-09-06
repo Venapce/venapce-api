@@ -17,6 +17,7 @@ import (
 	"github.com/Venapce/venapce-api/internal/config"
 	"github.com/Venapce/venapce-api/internal/cryptobox"
 	"github.com/Venapce/venapce-api/internal/db"
+	"github.com/Venapce/venapce-api/internal/flomorphic"
 	"github.com/Venapce/venapce-api/internal/osctrl"
 	"github.com/Venapce/venapce-api/internal/plugin"
 	"github.com/Venapce/venapce-api/internal/superset"
@@ -28,6 +29,7 @@ type Server struct {
 	sup *superset.Manager
 	osc *osctrl.Manager
 	plg *plugin.Manager
+	flo *flomorphic.Client // nil when FLOMORPHIC_URL / FLOMORPHIC_JWT_SECRET are unset
 	cfg config.Config
 }
 
@@ -39,6 +41,7 @@ func New(pool *pgxpool.Pool, box *cryptobox.Box, cfg config.Config) *Server {
 		sup: superset.NewManager(),
 		osc: osc,
 		plg: plugin.NewManager(pool, osc),
+		flo: flomorphic.NewClient(cfg.FlomorphicURL, cfg.FlomorphicJWTSecret),
 		cfg: cfg,
 	}
 }
@@ -111,6 +114,10 @@ func (s *Server) App() *fiber.App {
 	api.Post("/settings/flomorphic/osspace", s.connectOsspace)
 	// (Re)start the in-process venapce plugin from the stored plugin env.
 	api.Post("/settings/flomorphic/plugin/restart", s.restartVenapcePlugin)
+	// Redefine venapce in FloMorphic: delete the extension row + re-register + re-sync.
+	api.Post("/settings/flomorphic/plugin/refresh", s.refreshVenapcePlugin)
+	// Report plugin connectivity as FloMorphic sees it (live @actions round-trip).
+	api.Post("/settings/flomorphic/plugin/check", s.checkVenapcePlugin)
 	osc := api.Group("/osctrl")
 	osc.Get("/environments", s.osctrlEnvironments)
 	osc.Get("/nodes", s.osctrlNodes)
