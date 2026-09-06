@@ -33,7 +33,17 @@ func NewClient(baseURL, username, password, env string) *Client {
 		username: username,
 		password: password,
 		env:      env,
-		http:     &http.Client{Timeout: 30 * time.Second},
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			// Do not follow redirects. osctrl's API auth-check bounces a request
+			// with a stale token to an HTML forbidden page with a 302 (when the
+			// request does not advertise Accept: application/json). Following that
+			// would turn an auth failure into a 200 HTML body that fails to parse as
+			// JSON; surfacing the 3xx instead lets reauth-and-retry handle it.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
@@ -312,9 +322,14 @@ func (c *Client) reauth(ctx context.Context) error {
 }
 
 // isAuthExpired reports whether a response status means the session is no longer
-// valid and a re-login should be attempted: 401 (unauthorized) or 403 (osctrl
-// returns this once a JWT has expired).
+// valid and a re-login should be attempted: 401 (unauthorized), 403 (osctrl
+// returns this once a JWT has expired), or any 3xx redirect — with redirects not
+// followed, an auth bounce to the HTML forbidden page surfaces as a 302, and a
+// redirect on a JSON API call is never a legitimate response to act on.
 func isAuthExpired(status int) bool {
+	if status >= 300 && status < 400 {
+		return true
+	}
 	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
@@ -331,6 +346,10 @@ func (c *Client) do(ctx context.Context, method, path string, body any, token st
 	if err != nil {
 		return 0, nil, err
 	}
+	// Advertise JSON so osctrl's auth-check answers a stale/invalid token with a
+	// 401 JSON body (which reauth handles) instead of a 302 redirect to an HTML
+	// forbidden page.
+	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

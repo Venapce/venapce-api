@@ -3,7 +3,7 @@ module github.com/Venapce/venapce-api
 go 1.26.2
 
 require (
-	github.com/Inflowenger/go-plugin-sdk v0.1.7
+	github.com/Inflowenger/go-plugin-sdk v0.2.2
 	github.com/gofiber/fiber/v3 v3.5.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
