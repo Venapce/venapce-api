@@ -21,6 +21,12 @@ type supersetConfig struct {
 	URL         string `json:"url"`
 	Username    string `json:"username"`
 	PasswordEnc string `json:"password_enc"`
+	// Managed is true when this connection is owned by the deploy environment
+	// (auto-configured from SUPERSET_URL/SUPERSET_ADMIN_* on boot). A managed
+	// connection is refreshed from env on every boot and shown read-only in
+	// Settings. It flips to false the moment an operator overrides it with an
+	// external Superset, after which env no longer touches it.
+	Managed bool `json:"managed"`
 }
 
 func (s *Server) loadSupersetConfig(ctx context.Context) (*supersetConfig, error) {
@@ -54,6 +60,7 @@ func (s *Server) getSupersetSettings(c fiber.Ctx) error {
 		"configured": true,
 		"url":        cfg.URL,
 		"username":   cfg.Username,
+		"managed":    cfg.Managed,
 	})
 }
 
@@ -92,7 +99,9 @@ func (s *Server) putSupersetSettings(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "password is required")
 	}
 
-	cfg := supersetConfig{URL: body.URL, Username: body.Username, PasswordEnc: passEnc}
+	// Saving through the form is an explicit operator override — this connection
+	// is now theirs to manage, so env-managed bootstrapping no longer touches it.
+	cfg := supersetConfig{URL: body.URL, Username: body.Username, PasswordEnc: passEnc, Managed: false}
 	value, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -112,7 +121,7 @@ func (s *Server) putSupersetSettings(c fiber.Ctx) error {
 	client := superset.NewClient(cfg.URL, cfg.Username, pass)
 	s.sup.Set(client)
 
-	resp := fiber.Map{"configured": true, "url": cfg.URL, "username": cfg.Username}
+	resp := fiber.Map{"configured": true, "url": cfg.URL, "username": cfg.Username, "managed": false}
 	if who, err := client.TestLogin(c.Context()); err != nil {
 		resp["connected"] = false
 		resp["connectionError"] = err.Error()
@@ -122,6 +131,93 @@ func (s *Server) putSupersetSettings(c fiber.Ctx) error {
 		// Now that we have a working connection, (re)wire the database + datasets
 		// in the background. Idempotent, so re-saving settings is safe.
 		s.StartSupersetProvisioning()
+	}
+	return c.JSON(resp)
+}
+
+// bootstrapSupersetFromEnv configures the Superset connection from the deploy
+// environment (SUPERSET_URL/SUPERSET_ADMIN_USER/SUPERSET_ADMIN_PASS), so the
+// packaged product needs no manual Settings step. It (re)writes the stored
+// connection as *managed* and rebuilds the live client. It is a no-op when the
+// env is incomplete, or when the operator has overridden Superset with an
+// external instance (stored Managed==false). Safe to call on every boot.
+func (s *Server) bootstrapSupersetFromEnv(ctx context.Context) (bool, error) {
+	if !s.cfg.SupersetManaged() {
+		return false, nil
+	}
+	existing, err := s.loadSupersetConfig(ctx)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil && !existing.Managed {
+		// Operator points Venapce at their own Superset — leave it be.
+		return false, nil
+	}
+
+	passEnc, err := s.box.Encrypt(s.cfg.SupersetAdminPass)
+	if err != nil {
+		return false, err
+	}
+	cfg := supersetConfig{
+		URL:         s.cfg.SupersetURL,
+		Username:    s.cfg.SupersetAdminUser,
+		PasswordEnc: passEnc,
+		Managed:     true,
+	}
+	value, err := json.Marshal(cfg)
+	if err != nil {
+		return false, err
+	}
+	if _, err := s.q.UpsertSetting(ctx, db.UpsertSettingParams{Key: supersetSettingKey, Value: value}); err != nil {
+		return false, err
+	}
+	s.sup.Set(superset.NewClient(cfg.URL, cfg.Username, s.cfg.SupersetAdminPass))
+	return true, nil
+}
+
+// BootstrapSupersetFromEnv is the boot-time entry point (called from main after
+// LoadSupersetFromDB). It never blocks boot on a failure — the manual Settings
+// path always remains available.
+func (s *Server) BootstrapSupersetFromEnv(ctx context.Context) error {
+	_, err := s.bootstrapSupersetFromEnv(ctx)
+	return err
+}
+
+// POST /api/settings/superset/reset — revert to the built-in (env-managed)
+// Superset, discarding an external override. Only meaningful when the deploy
+// environment provides the built-in connection.
+func (s *Server) resetSupersetSettings(c fiber.Ctx) error {
+	if !s.cfg.SupersetManaged() {
+		return fiber.NewError(fiber.StatusBadRequest, "no built-in Superset is configured in this environment")
+	}
+	// Force a re-bootstrap even over an external override by clearing the
+	// managed flag guard: write the managed connection directly.
+	existing, err := s.loadSupersetConfig(c.Context())
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		existing.Managed = true // allow bootstrap to take over
+		value, _ := json.Marshal(existing)
+		_, _ = s.q.UpsertSetting(c.Context(), db.UpsertSettingParams{Key: supersetSettingKey, Value: value})
+	}
+	if _, err := s.bootstrapSupersetFromEnv(c.Context()); err != nil {
+		return err
+	}
+	cfg, err := s.loadSupersetConfig(c.Context())
+	if err != nil {
+		return err
+	}
+	resp := fiber.Map{"configured": true, "url": cfg.URL, "username": cfg.Username, "managed": true}
+	if client := s.sup.Get(); client != nil {
+		if who, err := client.TestLogin(c.Context()); err != nil {
+			resp["connected"] = false
+			resp["connectionError"] = err.Error()
+		} else {
+			resp["connected"] = true
+			resp["connectedAs"] = who
+			s.StartSupersetProvisioning()
+		}
 	}
 	return c.JSON(resp)
 }

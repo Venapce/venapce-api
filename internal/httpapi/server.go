@@ -63,6 +63,8 @@ func (s *Server) App() *fiber.App {
 	api.Get("/settings/superset", s.getSupersetSettings)
 	api.Put("/settings/superset", s.putSupersetSettings)
 	api.Post("/settings/superset/test", s.testSupersetSettings)
+	// Revert an external-Superset override back to the built-in (env-managed) one.
+	api.Post("/settings/superset/reset", s.resetSupersetSettings)
 	// On-demand demo data: load Superset's example datasets from the UI.
 	api.Get("/settings/superset/examples/status", s.getExamplesStatus)
 	api.Post("/settings/superset/examples", s.loadExamples)
@@ -96,6 +98,13 @@ func (s *Server) App() *fiber.App {
 	api.Get("/settings/osctrl", s.getOsctrlSettings)
 	api.Put("/settings/osctrl", s.putOsctrlSettings)
 	api.Post("/settings/osctrl/test", s.testOsctrlSettings)
+
+	// FloMorphic plugin registration + the osctrl-space broker. Venapce is a
+	// FloMorphic plugin; pasting the plugin env here lets the backend drive
+	// infra's osspace flow and auto-wire a managed osctrl connection.
+	api.Get("/settings/flomorphic", s.getFlomorphicSettings)
+	api.Put("/settings/flomorphic", s.putFlomorphicSettings)
+	api.Post("/settings/flomorphic/osspace", s.connectOsspace)
 	osc := api.Group("/osctrl")
 	osc.Get("/environments", s.osctrlEnvironments)
 	osc.Get("/nodes", s.osctrlNodes)

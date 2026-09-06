@@ -45,6 +45,13 @@ func main() {
 		log.Printf("warning: could not load stored osctrl settings: %v", err)
 	}
 
+	// In the packaged product Superset is bootstrapped by the deploy compose;
+	// self-configure the connection from env so the operator never types it. A
+	// no-op in dev without the env, or when the operator uses an external Superset.
+	if err := srv.BootstrapSupersetFromEnv(ctx); err != nil {
+		log.Printf("warning: could not bootstrap Superset from env: %v", err)
+	}
+
 	// Lazily wire Superset (register the venapce Postgres + data-table datasets)
 	// in the background so it never delays the listener; progress goes to the log.
 	srv.StartSupersetProvisioning()

@@ -21,6 +21,10 @@ type osctrlConfig struct {
 	Username    string `json:"username"`
 	Environment string `json:"environment"`
 	PasswordEnc string `json:"password_enc"`
+	// Managed is true when this connection was provisioned for the operator as an
+	// inflowenger osctrl space (via the FloMorphic broker), rather than typed into
+	// the self-hosted form. Shown read-only in Settings; a manual save flips it off.
+	Managed bool `json:"managed"`
 }
 
 func (s *Server) loadOsctrlConfig(ctx context.Context) (*osctrlConfig, error) {
@@ -55,6 +59,7 @@ func (s *Server) getOsctrlSettings(c fiber.Ctx) error {
 		"url":         cfg.URL,
 		"username":    cfg.Username,
 		"environment": cfg.Environment,
+		"managed":     cfg.Managed,
 	})
 }
 
@@ -94,7 +99,9 @@ func (s *Server) putOsctrlSettings(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "password is required")
 	}
 
-	cfg := osctrlConfig{URL: body.URL, Username: body.Username, Environment: body.Environment, PasswordEnc: passEnc}
+	// A manual save is the self-hosted path — this connection is the operator's,
+	// not a managed inflowenger space.
+	cfg := osctrlConfig{URL: body.URL, Username: body.Username, Environment: body.Environment, PasswordEnc: passEnc, Managed: false}
 	value, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -114,7 +121,7 @@ func (s *Server) putOsctrlSettings(c fiber.Ctx) error {
 	client := osctrl.NewClient(cfg.URL, cfg.Username, pass, cfg.Environment)
 	s.osc.Set(client)
 
-	resp := fiber.Map{"configured": true, "url": cfg.URL, "username": cfg.Username, "environment": cfg.Environment}
+	resp := fiber.Map{"configured": true, "url": cfg.URL, "username": cfg.Username, "environment": cfg.Environment, "managed": false}
 	if who, err := client.TestLogin(c.Context()); err != nil {
 		resp["connected"] = false
 		resp["connectionError"] = err.Error()
@@ -123,6 +130,29 @@ func (s *Server) putOsctrlSettings(c fiber.Ctx) error {
 		resp["connectedAs"] = who
 	}
 	return c.JSON(resp)
+}
+
+// saveManagedOsctrl persists an osctrl connection provisioned for the operator
+// (an inflowenger osctrl space) as *managed*, rebuilds the live client, and
+// probes the login. Used by the FloMorphic osspace broker so Nodes/Enroll go
+// live without the operator typing anything. Returns the logged-in username on
+// success.
+func (s *Server) saveManagedOsctrl(ctx context.Context, url, username, password, environment string) (string, error) {
+	passEnc, err := s.box.Encrypt(password)
+	if err != nil {
+		return "", err
+	}
+	cfg := osctrlConfig{URL: url, Username: username, Environment: environment, PasswordEnc: passEnc, Managed: true}
+	value, err := json.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	if _, err := s.q.UpsertSetting(ctx, db.UpsertSettingParams{Key: osctrlSettingKey, Value: value}); err != nil {
+		return "", err
+	}
+	client := osctrl.NewClient(url, username, password, environment)
+	s.osc.Set(client)
+	return client.TestLogin(ctx)
 }
 
 // POST /api/settings/osctrl/test — probe the currently stored connection.

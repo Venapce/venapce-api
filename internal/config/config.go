@@ -26,6 +26,22 @@ type Config struct {
 	SupersetDBName string      // display name of the Superset database connection
 	SupersetSchema string      // schema the data tables live in
 	SupersetDB     PostgresDSN // discrete connection fields for Superset's add-database form
+
+	// Superset admin connection, injected by the deploy compose (the very same
+	// credentials it bootstraps Superset's admin with). When all three are set the
+	// backend auto-configures the Superset connection on boot — the operator never
+	// types them in Settings. An advanced operator can still override the stored
+	// connection with an external Superset, at which point it becomes theirs to
+	// manage and env no longer touches it. See SupersetManaged.
+	SupersetURL       string // internal Superset base URL, e.g. http://superset:8088
+	SupersetAdminUser string
+	SupersetAdminPass string
+}
+
+// SupersetManaged reports whether the environment fully specifies the built-in
+// Superset connection, so the backend can self-configure it on boot.
+func (c Config) SupersetManaged() bool {
+	return c.SupersetURL != "" && c.SupersetAdminUser != "" && c.SupersetAdminPass != ""
 }
 
 // PostgresDSN is a Postgres connection broken into discrete fields. We hand these
@@ -68,6 +84,10 @@ func Load() Config {
 		SupersetDBName: env("SUPERSET_DB_NAME", "Venapce"),
 		SupersetSchema: env("SUPERSET_SCHEMA", "public"),
 		SupersetDB:     dsn,
+
+		SupersetURL:       env("SUPERSET_URL", ""),
+		SupersetAdminUser: env("SUPERSET_ADMIN_USER", ""),
+		SupersetAdminPass: env("SUPERSET_ADMIN_PASS", ""),
 	}
 }
 
