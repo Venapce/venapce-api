@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Venapce/venapce-api/internal/db"
+	"github.com/Venapce/venapce-api/internal/plugin"
 )
 
 // Venapce runs as a FloMorphic plugin: all business logic lives in FloMorphic
@@ -76,6 +77,7 @@ func (s *Server) getFlomorphicSettings(c fiber.Ctx) error {
 		"pluginId":      cfg.PluginID,
 		"infraBase":     cfg.InfraBase,
 		"osctrlManaged": osctrlManaged,
+		"plugin":        s.plg.Status(),
 	})
 }
 
@@ -123,7 +125,76 @@ func (s *Server) putFlomorphicSettings(c fiber.Ctx) error {
 	if _, err := s.q.UpsertSetting(c.Context(), db.UpsertSettingParams{Key: flomorphicSettingKey, Value: value}); err != nil {
 		return err
 	}
-	return c.JSON(fiber.Map{"configured": true, "pluginId": cfg.PluginID, "infraBase": cfg.InfraBase})
+
+	// Pasting the plugin env is exactly the "run/restart the plugin" trigger: use
+	// the just-saved env to (re)connect the in-process plugin to infra. A failure
+	// here (infra unreachable, etc.) is reported on the response, not fatal — the
+	// registration is saved and the plugin can be retried from the restart route.
+	resp := fiber.Map{"configured": true, "pluginId": cfg.PluginID, "infraBase": cfg.InfraBase}
+	if err := s.startVenapcePlugin(c.Context()); err != nil {
+		resp["pluginError"] = err.Error()
+	}
+	resp["plugin"] = s.plg.Status()
+	return c.JSON(resp)
+}
+
+// pluginEnv assembles the plugin connection env from the stored FloMorphic
+// registration, decrypting INFRA_CRED. It reports ok=false (no error) when no
+// registration is stored yet, so boot and the save path can both skip quietly.
+func (s *Server) pluginEnv(ctx context.Context) (plugin.Env, bool, error) {
+	cfg, err := s.loadFlomorphicConfig(ctx)
+	if err != nil || cfg == nil {
+		return plugin.Env{}, false, err
+	}
+	if cfg.InfraCredEnc == "" {
+		return plugin.Env{}, false, nil
+	}
+	cred, err := s.box.Decrypt(cfg.InfraCredEnc)
+	if err != nil {
+		return plugin.Env{}, false, err
+	}
+	return plugin.Env{
+		PluginID:  cfg.PluginID,
+		InfraURL:  cfg.InfraURLRaw,
+		InfraCred: cred,
+	}, true, nil
+}
+
+// startVenapcePlugin (re)connects the in-process plugin from the stored env. It
+// is a no-op when nothing is registered yet, and idempotent when the env is
+// unchanged (the manager fingerprints it).
+func (s *Server) startVenapcePlugin(ctx context.Context) error {
+	env, ok, err := s.pluginEnv(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	return s.plg.Start(env)
+}
+
+// StartVenapcePlugin is the boot-time entry point (called from main), mirroring
+// LoadOsctrlFromDB: it never blocks boot, and a failure only means the plugin is
+// offline until the operator saves/restarts it.
+func (s *Server) StartVenapcePlugin(ctx context.Context) error {
+	return s.startVenapcePlugin(ctx)
+}
+
+// POST /api/settings/flomorphic/plugin/restart — force a (re)connect of the
+// in-process plugin from the stored env, and report the resulting status.
+func (s *Server) restartVenapcePlugin(c fiber.Ctx) error {
+	env, ok, err := s.pluginEnv(c.Context())
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fiber.NewError(fiber.StatusBadRequest, "no plugin env stored — paste the FloMorphic plugin env in Settings first")
+	}
+	if err := s.plg.Start(env); err != nil {
+		return c.JSON(fiber.Map{"restarted": false, "plugin": s.plg.Status(), "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"restarted": true, "plugin": s.plg.Status()})
 }
 
 // POST /api/settings/flomorphic/osspace — drive infra's osspace flow. Idempotent

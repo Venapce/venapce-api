@@ -18,6 +18,7 @@ import (
 	"github.com/Venapce/venapce-api/internal/cryptobox"
 	"github.com/Venapce/venapce-api/internal/db"
 	"github.com/Venapce/venapce-api/internal/osctrl"
+	"github.com/Venapce/venapce-api/internal/plugin"
 	"github.com/Venapce/venapce-api/internal/superset"
 )
 
@@ -26,15 +27,18 @@ type Server struct {
 	box *cryptobox.Box
 	sup *superset.Manager
 	osc *osctrl.Manager
+	plg *plugin.Manager
 	cfg config.Config
 }
 
 func New(pool *pgxpool.Pool, box *cryptobox.Box, cfg config.Config) *Server {
+	osc := osctrl.NewManager()
 	return &Server{
 		q:   db.New(pool),
 		box: box,
 		sup: superset.NewManager(),
-		osc: osctrl.NewManager(),
+		osc: osc,
+		plg: plugin.NewManager(pool, osc),
 		cfg: cfg,
 	}
 }
@@ -105,6 +109,8 @@ func (s *Server) App() *fiber.App {
 	api.Get("/settings/flomorphic", s.getFlomorphicSettings)
 	api.Put("/settings/flomorphic", s.putFlomorphicSettings)
 	api.Post("/settings/flomorphic/osspace", s.connectOsspace)
+	// (Re)start the in-process venapce plugin from the stored plugin env.
+	api.Post("/settings/flomorphic/plugin/restart", s.restartVenapcePlugin)
 	osc := api.Group("/osctrl")
 	osc.Get("/environments", s.osctrlEnvironments)
 	osc.Get("/nodes", s.osctrlNodes)

@@ -45,6 +45,13 @@ func main() {
 		log.Printf("warning: could not load stored osctrl settings: %v", err)
 	}
 
+	// Connect the in-process venapce plugin (db.* + osquery.* actions) to infra
+	// using the stored FloMorphic plugin env. A no-op until the operator has
+	// pasted that env; never blocks boot.
+	if err := srv.StartVenapcePlugin(ctx); err != nil {
+		log.Printf("warning: could not start venapce plugin: %v", err)
+	}
+
 	// In the packaged product Superset is bootstrapped by the deploy compose;
 	// self-configure the connection from env so the operator never types it. A
 	// no-op in dev without the env, or when the operator uses an external Superset.
