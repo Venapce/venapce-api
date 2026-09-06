@@ -540,11 +540,14 @@ func buildForms(t table) (upsert, update sdkv1.FormBuilder) {
 }
 
 func formFor(t table, idRequired bool) sdkv1.FormBuilder {
-	idField := formkit.Integer("id", "Id")
+	// Id is a Text field, not Integer, so the value can be a {{$.path}} token as
+	// well as a literal whole number — an integer control would refuse the braces.
+	// readID parses the resolved value back to an int64 at write time.
+	idField := formkit.Text("id", "Id")
 	if idRequired {
-		idField = idField.Required().Describe("The " + t.title + " to update.")
+		idField = idField.Required().Describe("The " + t.title + " to update. A whole number or a {{$.path}} token.")
 	} else {
-		idField = idField.Describe("Leave blank to insert a new " + t.title + "; set it to update an existing one in place.")
+		idField = idField.Describe("Leave blank to insert a new " + t.title + "; set it to update an existing one in place. A whole number or a {{$.path}} token.")
 	}
 
 	fields := []*formkit.Field{idField}
@@ -567,9 +570,11 @@ func fieldFor(c column) *formkit.Field {
 	case kindJSON:
 		return formkit.TextArea(c.name, label).Describe("A JSON object, e.g. {\"key\": \"value\"}. Accepts {{$.path}} tokens.")
 	case kindInt:
-		return formkit.Integer(c.name, label)
+		// Text, not Integer, so a {{$.path}} token is accepted as well as a
+		// literal number; coerce parses the resolved value back to an int.
+		return formkit.Text(c.name, label).Describe("A whole number or a {{$.path}} token.")
 	default:
-		return formkit.Text(c.name, label)
+		return formkit.Text(c.name, label).Describe("Accepts {{$.path}} tokens.")
 	}
 }
 
