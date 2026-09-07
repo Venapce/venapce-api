@@ -11,9 +11,13 @@ import (
 	"github.com/Venapce/venapce-api/internal/cryptobox"
 	"github.com/Venapce/venapce-api/internal/httpapi"
 	"github.com/Venapce/venapce-api/internal/store"
+	"github.com/Venapce/venapce-api/internal/version"
 )
 
 func main() {
+	// First line in the log, before anything can fail: which build is running.
+	log.Printf("venapce-api version %s", version.Current())
+
 	cfg := config.Load()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -64,7 +68,7 @@ func main() {
 	srv.StartSupersetProvisioning()
 
 	app := srv.App()
-	log.Printf("venapce-api listening on :%s", cfg.Port)
+	log.Printf("venapce-api %s listening on :%s", version.Current(), cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {
 		log.Fatalf("listen: %v", err)
 	}

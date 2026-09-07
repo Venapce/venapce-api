@@ -21,6 +21,7 @@ import (
 	"github.com/Venapce/venapce-api/internal/osctrl"
 	"github.com/Venapce/venapce-api/internal/plugin"
 	"github.com/Venapce/venapce-api/internal/superset"
+	"github.com/Venapce/venapce-api/internal/version"
 )
 
 type Server struct {
@@ -61,10 +62,16 @@ func (s *Server) App() *fiber.App {
 	}))
 
 	app.Get("/healthz", func(c fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok"})
+		return c.JSON(fiber.Map{"status": "ok", "version": version.Current()})
 	})
 
 	api := app.Group("/api")
+
+	// The running build, so the panel can show the appliance version it is
+	// talking to (its own is baked in at build time from the same VERSION).
+	api.Get("/version", func(c fiber.Ctx) error {
+		return c.JSON(fiber.Map{"version": version.Current()})
+	})
 
 	// Superset connection settings (moved off the browser login screen).
 	api.Get("/settings/superset", s.getSupersetSettings)
