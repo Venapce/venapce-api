@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/jackc/pgx/v5"
@@ -204,7 +205,12 @@ func (s *Server) osctrlEnvironments(c fiber.Ctx) error {
 	return writeRaw(c, raw)
 }
 
-// GET /api/osctrl/nodes?env=
+// GET /api/osctrl/nodes?env=&page=&page_size=&q=&status=&sort=&dir=&platform=
+//
+// Proxies osctrl's canonical paginated nodes endpoint so the front can page
+// through environments with more than one screen of enrolled systems. The
+// pagination/search/sort params are forwarded through unchanged; the response
+// carries { items, page, page_size, total_items, total_pages }.
 func (s *Server) osctrlNodes(c fiber.Ctx) error {
 	cl, err := s.osctrlClient()
 	if err != nil {
@@ -214,7 +220,15 @@ func (s *Server) osctrlNodes(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	raw, err := cl.Nodes(c.Context(), env)
+	// Forward only the params osctrl's paged endpoint understands; env travels in
+	// the path, not the query string.
+	q := url.Values{}
+	for _, k := range []string{"page", "page_size", "q", "status", "sort", "dir", "platform"} {
+		if v := c.Query(k); v != "" {
+			q.Set(k, v)
+		}
+	}
+	raw, err := cl.NodesPaged(c.Context(), env, q.Encode())
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadGateway, err.Error())
 	}

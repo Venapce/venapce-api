@@ -148,13 +148,40 @@ func (c *Client) Environments(ctx context.Context) (json.RawMessage, error) {
 	return c.getRaw(ctx, "/environments")
 }
 
-// Nodes returns all enrolled nodes for an environment. osctrl answers 404 with a
-// "no nodes" body when the environment is empty — normalize that to [].
+// Nodes returns all enrolled nodes for an environment as a flat array. osctrl
+// answers 404 with a "no nodes" body when the environment is empty — normalize
+// that to []. Used where the full list is wanted (e.g. the plugin node picker);
+// the HTTP proxy uses NodesPaged instead.
 func (c *Client) Nodes(ctx context.Context, env string) (json.RawMessage, error) {
 	raw, err := c.getRaw(ctx, "/nodes/"+env+"/all")
 	if err != nil {
 		if strings.Contains(err.Error(), "404") {
 			return json.RawMessage("[]"), nil
+		}
+		return nil, err
+	}
+	return raw, nil
+}
+
+// emptyNodesPage is the paged response shape returned for an environment osctrl
+// does not know (404), so the front renders an empty table rather than an error.
+const emptyNodesPage = `{"items":[],"page":1,"page_size":0,"total_items":0,"total_pages":1}`
+
+// NodesPaged returns one page of enrolled nodes for an environment from osctrl's
+// canonical paginated endpoint (GET /api/v1/nodes/{env}). rawQuery carries the
+// page / page_size / q / status / sort / dir / platform params the front sends;
+// the response is passed through verbatim
+// ({ items, page, page_size, total_items, total_pages }). A 404 (unknown env) is
+// normalized to an empty page.
+func (c *Client) NodesPaged(ctx context.Context, env, rawQuery string) (json.RawMessage, error) {
+	path := "/nodes/" + env
+	if rawQuery != "" {
+		path += "?" + rawQuery
+	}
+	raw, err := c.getRaw(ctx, path)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			return json.RawMessage(emptyNodesPage), nil
 		}
 		return nil, err
 	}
