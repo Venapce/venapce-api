@@ -48,6 +48,12 @@ func main() {
 	if err := srv.LoadOsctrlFromDB(ctx); err != nil {
 		log.Printf("warning: could not load stored osctrl settings: %v", err)
 	}
+	// Where FloMorphic is: env (FLOMORPHIC_URL / FLOMORPHIC_JWT_SECRET / INFRA_HOST)
+	// is the default, and anything the operator saved in Settings overrides it. Done
+	// before the plugin starts so a corrected address is in force from the first call.
+	if err := srv.LoadFlomorphicFromDB(ctx); err != nil {
+		log.Printf("warning: could not load stored FloMorphic settings: %v", err)
+	}
 
 	// Connect the in-process venapce plugin (db.* + osquery.* actions) to infra
 	// using the stored FloMorphic plugin env. A no-op until the operator has

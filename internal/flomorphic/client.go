@@ -123,6 +123,15 @@ type HTTPError struct {
 func (e *HTTPError) Error() string { return fmt.Sprintf("FloMorphic: %d %s", e.Status, e.Body) }
 func (e *HTTPError) NotFound() bool { return e.Status == http.StatusNotFound }
 
+// Ping verifies the configured access end to end: that FloMorphic answers at the
+// base URL and that it accepts a token signed with the shared secret. It reads the
+// (auth-gated) extension list rather than the public /health route, so a wrong
+// secret fails here instead of at the first real call. Nothing is created.
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.do(ctx, http.MethodGet, "/extension?per_page=1", nil)
+	return err
+}
+
 // Extension is the subset of a FloMorphic extension row venapce tracks: the row
 // id (to sync/delete it) and the inflowv1 PluginID FloMorphic assigned it (to
 // mint a credential for and connect the plugin as).

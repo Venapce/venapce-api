@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Venapce/venapce-api/internal/config"
 	"github.com/Venapce/venapce-api/internal/db"
 	"github.com/Venapce/venapce-api/internal/flomorphic"
 	"github.com/Venapce/venapce-api/internal/osctrl"
@@ -28,6 +29,14 @@ import (
 // flow (Google OAuth -> a provisioned osctrl space).
 const flomorphicSettingKey = "flomorphic"
 
+// errFlomorphicUnconfigured is what every route that needs the FloMorphic API says
+// when there is no usable client. It names the Settings card first because that is
+// now the way to fix it without restarting the container.
+const errFlomorphicUnconfigured = "FloMorphic API is not configured — set the FloMorphic URL and JWT secret in Settings (or FLOMORPHIC_URL / FLOMORPHIC_JWT_SECRET in the environment)"
+
+// floClient is the live FloMorphic client, or nil when the access is incomplete.
+func (s *Server) floClient() *flomorphic.Client { return s.flo.Get() }
+
 // infraOsspacePort is the HTTP port infra serves its license/command API on. The
 // plugin env's INFRA_URL points at the NATS port (4222); the osspace endpoint
 // lives on the same host at this port.
@@ -41,9 +50,9 @@ type flomorphicConfig struct {
 	ExtensionID string `json:"extension_id,omitempty"`
 	// PluginID is the inflowv1 identity FloMorphic assigned that row (name-<uuid>);
 	// the plugin connects as it and the credential is scoped to it.
-	PluginID    string `json:"plugin_id"`
-	InfraURLRaw string `json:"infra_url_raw"` // the plugin's INFRA_URL (nats://host:4222)
-	InfraBase   string `json:"infra_base"`    // derived http://host:8022
+	PluginID     string `json:"plugin_id"`
+	InfraURLRaw  string `json:"infra_url_raw"` // the plugin's INFRA_URL (nats://host:4222)
+	InfraBase    string `json:"infra_base"`    // derived http://host:8022
 	InfraCredEnc string `json:"infra_cred_enc,omitempty"`
 }
 
@@ -71,15 +80,14 @@ func (s *Server) getFlomorphicSettings(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	// Surface the env-sourced FloMorphic API config (FLOMORPHIC_URL +
-	// FLOMORPHIC_JWT_SECRET) so the Settings card can show the URL and whether the
-	// signing secret is set, and offer "connect" without asking the operator to
-	// paste anything. The secret value itself is never returned. apiConfigured is
-	// true only when both are present (== a usable client).
-	apiInfo := fiber.Map{
-		"apiConfigured": s.flo != nil,
-		"apiUrl":        s.cfg.FlomorphicURL,
-		"jwtSecretSet":  s.cfg.FlomorphicJWTSecret != "",
+	// Surface the live FloMorphic access (env defaults, overridden by whatever the
+	// operator saved in Settings) so the card can show the URL and whether the
+	// signing secret is set, and offer "connect" without asking anyone to paste
+	// anything. The secret value itself is never returned. apiConfigured is true
+	// only when URL and secret are both present (== a usable client).
+	apiInfo, err := s.flomorphicAccessView(c.Context())
+	if err != nil {
+		return err
 	}
 	if cfg == nil {
 		apiInfo["configured"] = false
@@ -114,8 +122,8 @@ const (
 // credential for that id, connect the in-process plugin, then sync its actions
 // into palette nodes. Reuses the stored row on repeat calls.
 func (s *Server) putFlomorphicSettings(c fiber.Ctx) error {
-	if s.flo == nil {
-		return fiber.NewError(fiber.StatusBadRequest, "FloMorphic API is not configured — set FLOMORPHIC_URL and FLOMORPHIC_JWT_SECRET")
+	if s.floClient() == nil {
+		return fiber.NewError(fiber.StatusBadRequest, errFlomorphicUnconfigured)
 	}
 	return s.registerPlugin(c, false)
 }
@@ -125,8 +133,8 @@ func (s *Server) putFlomorphicSettings(c fiber.Ctx) error {
 // (new row + plugin id + credential) and re-sync. This is the "clear and re-add"
 // path for picking up a changed action set.
 func (s *Server) refreshVenapcePlugin(c fiber.Ctx) error {
-	if s.flo == nil {
-		return fiber.NewError(fiber.StatusBadRequest, "FloMorphic API is not configured — set FLOMORPHIC_URL and FLOMORPHIC_JWT_SECRET")
+	if s.floClient() == nil {
+		return fiber.NewError(fiber.StatusBadRequest, errFlomorphicUnconfigured)
 	}
 	return s.registerPlugin(c, true)
 }
@@ -145,7 +153,7 @@ func (s *Server) registerPlugin(c fiber.Ctx, recreate bool) error {
 	// clean. Best effort: a missing row is fine, and a delete failure still lets us
 	// try to create a new one.
 	if recreate && existing != nil && existing.ExtensionID != "" {
-		if err := s.flo.DeleteExtension(ctx, existing.ExtensionID); err != nil {
+		if err := s.floClient().DeleteExtension(ctx, existing.ExtensionID); err != nil {
 			return fiber.NewError(fiber.StatusBadGateway, "delete existing FloMorphic extension: "+err.Error())
 		}
 		existing = nil
@@ -159,7 +167,7 @@ func (s *Server) registerPlugin(c fiber.Ctx, recreate bool) error {
 		extID, pluginID = existing.ExtensionID, existing.PluginID
 	}
 	if extID == "" || pluginID == "" {
-		ext, err := s.flo.CreateExtension(ctx, defaultPluginName, defaultPluginDescription)
+		ext, err := s.floClient().CreateExtension(ctx, defaultPluginName, defaultPluginDescription)
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadGateway, "register extension in FloMorphic: "+err.Error())
 		}
@@ -170,10 +178,10 @@ func (s *Server) registerPlugin(c fiber.Ctx, recreate bool) error {
 	// venapce can actually reach (INFRA_HOST); FloMorphic's env renderer lets a
 	// declared INFRA_URL win, and deriveInfraBase yields the matching osspace base.
 	var extra []flomorphic.EnvVar
-	if url := s.cfg.InfraNatsURL(); url != "" {
+	if url := config.InfraNatsURL(s.flo.Access().InfraHost); url != "" {
 		extra = append(extra, flomorphic.EnvVar{Key: "INFRA_URL", Value: url})
 	}
-	envText, _, err := s.flo.MintPluginEnv(ctx, pluginID, extra)
+	envText, _, err := s.floClient().MintPluginEnv(ctx, pluginID, extra)
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadGateway, "mint plugin credential from FloMorphic: "+err.Error())
 	}
@@ -260,7 +268,7 @@ func (s *Server) syncWithRetry(ctx context.Context, extID string) (flomorphic.Sy
 			case <-time.After(600 * time.Millisecond):
 			}
 		}
-		res, err := s.flo.SyncExtension(ctx, extID)
+		res, err := s.floClient().SyncExtension(ctx, extID)
 		if err == nil {
 			return res, nil
 		}
@@ -274,12 +282,12 @@ func (s *Server) syncWithRetry(ctx context.Context, extID string) (flomorphic.Sy
 // inflowv1 (@actions). It is best effort with a short timeout and returns nil when
 // there is no extension row to probe.
 func (s *Server) pluginProbe(ctx context.Context, extID string) fiber.Map {
-	if s.flo == nil || strings.TrimSpace(extID) == "" {
+	if s.floClient() == nil || strings.TrimSpace(extID) == "" {
 		return nil
 	}
 	pctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	actions, err := s.flo.ProbeExtension(pctx, extID)
+	actions, err := s.floClient().ProbeExtension(pctx, extID)
 	if err != nil {
 		return fiber.Map{"reachable": false, "error": err.Error()}
 	}

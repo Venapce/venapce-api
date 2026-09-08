@@ -30,7 +30,10 @@ type Server struct {
 	sup *superset.Manager
 	osc *osctrl.Manager
 	plg *plugin.Manager
-	flo *flomorphic.Client // nil when FLOMORPHIC_URL / FLOMORPHIC_JWT_SECRET are unset
+	// FloMorphic access (API base + shared secret + infra host), seeded from env
+	// and replaceable at runtime from Settings. Holds the live client, which is nil
+	// while that access is incomplete.
+	flo *flomorphic.Manager
 	cfg config.Config
 }
 
@@ -42,7 +45,11 @@ func New(pool *pgxpool.Pool, box *cryptobox.Box, cfg config.Config) *Server {
 		sup: superset.NewManager(),
 		osc: osc,
 		plg: plugin.NewManager(pool, osc),
-		flo: flomorphic.NewClient(cfg.FlomorphicURL, cfg.FlomorphicJWTSecret),
+		flo: flomorphic.NewManager(flomorphic.Access{
+			URL:       cfg.FlomorphicURL,
+			JWTSecret: cfg.FlomorphicJWTSecret,
+			InfraHost: cfg.InfraHost,
+		}),
 		cfg: cfg,
 	}
 }
@@ -118,6 +125,13 @@ func (s *Server) App() *fiber.App {
 	// infra's osspace flow and auto-wire a managed osctrl connection.
 	api.Get("/settings/flomorphic", s.getFlomorphicSettings)
 	api.Put("/settings/flomorphic", s.putFlomorphicSettings)
+	// Where FloMorphic is: the env values (FLOMORPHIC_URL / FLOMORPHIC_JWT_SECRET /
+	// INFRA_HOST) are only the default — these let an operator set them from the
+	// panel, so an install that skipped FloMorphic can be wired up later without
+	// editing .env and recreating the container.
+	api.Put("/settings/flomorphic/api", s.putFlomorphicAPISettings)
+	api.Post("/settings/flomorphic/api/test", s.testFlomorphicAPISettings)
+	api.Post("/settings/flomorphic/api/reset", s.resetFlomorphicAPISettings)
 	api.Post("/settings/flomorphic/osspace", s.connectOsspace)
 	// (Re)start the in-process venapce plugin from the stored plugin env.
 	api.Post("/settings/flomorphic/plugin/restart", s.restartVenapcePlugin)

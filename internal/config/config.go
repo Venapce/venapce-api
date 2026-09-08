@@ -69,11 +69,18 @@ func (c Config) FlomorphicConfigured() bool {
 // Passed as an INFRA_URL extra when minting the plugin credential so the returned
 // env points the plugin (and, via deriveInfraBase, osspace) at the reachable host.
 // Empty when InfraHost is unset.
-func (c Config) InfraNatsURL() string {
-	if c.InfraHost == "" {
+func (c Config) InfraNatsURL() string { return InfraNatsURL(c.InfraHost) }
+
+// InfraNatsURL builds a plugin INFRA_URL (nats://host:4222) for an arbitrary host,
+// or "" when host is empty. Package-level as well as a Config method because the
+// host can be overridden from Settings at runtime, not just by this process's
+// environment.
+func InfraNatsURL(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
 		return ""
 	}
-	return "nats://" + net.JoinHostPort(c.InfraHost, infraNatsPort)
+	return "nats://" + net.JoinHostPort(host, infraNatsPort)
 }
 
 // SupersetManaged reports whether the environment fully specifies the built-in
