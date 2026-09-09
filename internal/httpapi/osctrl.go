@@ -235,6 +235,34 @@ func (s *Server) osctrlNodes(c fiber.Ctx) error {
 	return writeRaw(c, raw)
 }
 
+// GET /api/osctrl/nodes/:uuid?env=
+//
+// Node detail for the systems page. The identifier is whatever osctrl accepts
+// (uuid, hostname or localname); an identifier the environment does not hold is
+// a 404 here, not a 502.
+func (s *Server) osctrlNode(c fiber.Ctx) error {
+	cl, err := s.osctrlClient()
+	if err != nil {
+		return err
+	}
+	env, err := s.envParam(c, cl)
+	if err != nil {
+		return err
+	}
+	node := c.Params("uuid")
+	if node == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "node identifier is required")
+	}
+	raw, err := cl.Node(c.Context(), env, node)
+	if err != nil {
+		if errors.Is(err, osctrl.ErrNodeNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "node not found")
+		}
+		return fiber.NewError(fiber.StatusBadGateway, err.Error())
+	}
+	return writeRaw(c, raw)
+}
+
 // GET /api/osctrl/enroll?env=&target=
 func (s *Server) osctrlEnroll(c fiber.Ctx) error {
 	cl, err := s.osctrlClient()

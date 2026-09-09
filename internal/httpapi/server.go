@@ -142,6 +142,7 @@ func (s *Server) App() *fiber.App {
 	osc := api.Group("/osctrl")
 	osc.Get("/environments", s.osctrlEnvironments)
 	osc.Get("/nodes", s.osctrlNodes)
+	osc.Get("/nodes/:uuid", s.osctrlNode)
 	osc.Get("/enroll", s.osctrlEnroll)
 	osc.Post("/enroll/actions", s.osctrlEnrollAction)
 

@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "make run (task)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "make run",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug venapce-api",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/api",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env"
+    }
+  ]
+}

@@ -8,9 +8,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -187,6 +189,26 @@ func (c *Client) NodesPaged(ctx context.Context, env, rawQuery string) (json.Raw
 	}
 	return raw, nil
 }
+
+// Node returns a single enrolled node for an environment. osctrl resolves the
+// identifier against uuid / hostname / localname
+// (GET /api/v1/nodes/{env}/node/{node}) and answers 404 when the environment
+// does not hold it — surfaced as ErrNodeNotFound so the proxy can answer 404
+// rather than a 502.
+func (c *Client) Node(ctx context.Context, env, node string) (json.RawMessage, error) {
+	raw, err := c.getRaw(ctx, "/nodes/"+url.PathEscape(env)+"/node/"+url.PathEscape(node))
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			return nil, ErrNodeNotFound
+		}
+		return nil, err
+	}
+	return raw, nil
+}
+
+// ErrNodeNotFound is returned by Node when osctrl does not know the identifier
+// in that environment.
+var ErrNodeNotFound = errors.New("node not found")
 
 // Enroll assembles the enrollment helper values for an environment from osctrl's
 // per-target endpoints (secret, flags, and the sh/ps1 one-liners for both the
