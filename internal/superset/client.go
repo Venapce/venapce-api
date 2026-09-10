@@ -197,7 +197,7 @@ func (c *Client) control(ctx context.Context, method, path string, body any) (in
 	if err != nil {
 		return 0, nil, err
 	}
-	if status == http.StatusUnauthorized {
+	if isAuthFailure(status, data) {
 		if err := c.refresh(ctx); err != nil {
 			return 0, nil, err
 		}
@@ -253,7 +253,7 @@ func (c *Client) call(ctx context.Context, method, path string, body any, out an
 	if err != nil {
 		return err
 	}
-	if status == http.StatusUnauthorized {
+	if isAuthFailure(status, data) {
 		if err := c.refresh(ctx); err != nil {
 			return err
 		}
@@ -347,6 +347,39 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	return req, nil
+}
+
+// isAuthFailure reports whether a Superset response means "this token is no
+// longer good" rather than "this request was bad", i.e. whether it is worth
+// re-authenticating and trying once more.
+//
+// Superset answers an *expired* token with 401, but a token it cannot verify at
+// all — malformed, or signed with a key it no longer holds, which is what a
+// Superset restart with a fresh SECRET_KEY leaves behind — with 422. Without
+// this, such a token is never replaced: ensureAuth only logs in when the token
+// is empty, so the client would keep replaying a dead token until the process
+// restarts.
+//
+// 422 is also Superset's ordinary validation status ("Dataset already exists"),
+// which must NOT trigger a re-login, so the two are told apart by the body:
+// flask-jwt-extended reports {"msg": ...} while the REST API reports
+// {"message": ...} / {"errors": [...]}.
+func isAuthFailure(status int, body []byte) bool {
+	if status == http.StatusUnauthorized {
+		return true
+	}
+	if status != http.StatusUnprocessableEntity {
+		return false
+	}
+	var probe struct {
+		Msg     json.RawMessage `json:"msg"`
+		Message json.RawMessage `json:"message"`
+		Errors  json.RawMessage `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return false
+	}
+	return len(probe.Msg) > 0 && len(probe.Message) == 0 && len(probe.Errors) == 0
 }
 
 func truncate(b []byte, n int) string {
