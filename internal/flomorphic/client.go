@@ -120,7 +120,7 @@ type HTTPError struct {
 	Body   string
 }
 
-func (e *HTTPError) Error() string { return fmt.Sprintf("FloMorphic: %d %s", e.Status, e.Body) }
+func (e *HTTPError) Error() string  { return fmt.Sprintf("FloMorphic: %d %s", e.Status, e.Body) }
 func (e *HTTPError) NotFound() bool { return e.Status == http.StatusNotFound }
 
 // Ping verifies the configured access end to end: that FloMorphic answers at the
@@ -140,6 +140,15 @@ type Extension struct {
 	PluginID string `json:"pluginId"`
 }
 
+// extensionIcon is the icon FloMorphic shows for venapce on the Extensions page
+// and on any palette node whose action declares no icon of its own. FloMorphic
+// resolves icons by name only: an `mdi-*` name is drawn from its bundled
+// Material Design Icons set, anything else must be one of its curated local
+// names (an unknown name silently renders as the generic "info" glyph). The
+// shield-with-magnifier fits venapce's security/osquery role and matches the
+// mdi-* style the action icons already use.
+var extensionIcon = map[string]any{"class": "mdi", "name": "mdi-shield-search", "meta": map[string]any{}}
+
 // CreateExtension registers venapce as a plugin-backed palette extension and
 // returns the created row. FloMorphic assigns the PluginID (name-<uuid>) and
 // ignores any we send, so the caller does not choose it.
@@ -149,7 +158,7 @@ func (c *Client) CreateExtension(ctx context.Context, name, description string) 
 		"type":        "plugin",
 		"name":        name,
 		"description": description,
-		"icon":        map[string]any{"class": "flomorphic", "name": "plug", "meta": map[string]any{}},
+		"icon":        extensionIcon,
 	}
 	data, err := c.do(ctx, http.MethodPost, "/extension", body)
 	if err != nil {

@@ -1,6 +1,7 @@
-// Package osquery is the venapce plugin's osquery/osctrl module. It exposes one
-// action — run a distributed osquery SQL against a node the user picks — plus the
-// meta lookups that fill the node and environment pickers on its form.
+// Package osquery is the venapce plugin's osquery/osctrl module. It exposes two
+// actions — run a distributed osquery SQL against one node the user picks, or
+// against every node carrying any of the tags they pick — plus the meta lookups
+// that fill the node, tag and environment pickers on their forms.
 //
 // It carries no connection settings: the live osctrl client is venapce's own
 // (internal/osctrl), injected as a Manager. osctrl distributed queries are
@@ -30,8 +31,19 @@ const (
 	pollEvery = 2 * time.Second
 	// metaTimeout keeps the form's picker lookups snappy.
 	metaTimeout = 15 * time.Second
-	// resultPageSize caps how many result rows one collect returns.
-	resultPageSize = 100
+	// resultPageSize is how many result rows one results call fetches.
+	resultPageSize = 200
+	// resultMaxRows caps the rows a job commits, so a broad tag-targeted query
+	// over a large fleet cannot balloon the flow scope. The output says when it
+	// was hit.
+	resultMaxRows = 5000
+)
+
+// Action method names. The forms' lookup buttons quote them (Field.Picks) so
+// the environment picker, shared by both forms, knows which one to rebuild.
+const (
+	methodQuery       = "osquery.query"
+	methodQueryByTags = "osquery.queryByTags"
 )
 
 // queryForm is kept as the built form so the node/env pickers can rebuild it with
@@ -41,7 +53,7 @@ var queryForm = formkit.New("Run osquery").
 	Add(
 		formkit.Text("env", "Environment").
 			Describe("osctrl environment. Leave blank to use venapce's default. Press ↻ to list environments.").
-			Lookup("osquery.meta.environments", "Environments"),
+			Lookup("osquery.meta.environments", "Environments").Picks(methodQuery),
 		formkit.Text("uuid", "Node").Required().
 			Describe("The enrolled node's UUID to query. Press ↻ to list nodes for the environment and pick one.").
 			Lookup("osquery.meta.nodes", "Nodes"),
@@ -49,28 +61,73 @@ var queryForm = formkit.New("Run osquery").
 			Describe("An osquery SQL statement, e.g. SELECT name, path, pid FROM processes LIMIT 20. Accepts {{$.path}} tokens."),
 	).Build()
 
-// Actions returns the osquery module's action(s), bound to venapce's osctrl.
+// queryByTagsForm targets by osctrl tag instead of by node. `tags` is an array
+// property so the picker can re-render it as a multi-select (see
+// flow.ChooseMany); until ↻ is pressed it is a plain add/remove list of names.
+var queryByTagsForm = formkit.New("Run osquery by tags").
+	Describe("Dispatch an osquery SQL to every active node carrying any of the selected osctrl tags (e.g. `linux`) and collect the rows they report. Nodes answer on their next check-in, so this may take a while for a large fleet.").
+	Add(
+		formkit.Text("env", "Environment").
+			Describe("osctrl environment. Leave blank to use venapce's default. Press ↻ to list environments.").
+			Lookup("osquery.meta.environments", "Environments").Picks(methodQueryByTags),
+		formkit.List("tags", "Tags").Required().Set("uniqueItems", true).
+			Describe("osctrl tag names to target; a node matching ANY of them is queried. Press ↻ to list the environment's tags and tick the ones you want.").
+			Lookup("osquery.meta.tags", "Tags"),
+		formkit.TextArea("sql", "osquery SQL").Required().
+			Describe("An osquery SQL statement, e.g. SELECT name, path, pid FROM processes LIMIT 20. Accepts {{$.path}} tokens."),
+	).Build()
+
+// Actions returns the osquery module's actions, bound to venapce's osctrl.
 func Actions(m *osctrl.Manager) []sdkv1.Action {
-	return []sdkv1.Action{queryAction(m)}
+	return []sdkv1.Action{queryAction(m), queryByTagsAction(m)}
 }
 
-// Metas returns the picker lookups the query form uses.
+// Metas returns the picker lookups the query forms use.
 func Metas(m *osctrl.Manager) []sdkv1.Meta {
 	return []sdkv1.Meta{
 		{Method: "osquery.meta.nodes", RequestHandler: metaNodes(m)},
+		{Method: "osquery.meta.tags", RequestHandler: metaTags(m)},
 		{Method: "osquery.meta.environments", RequestHandler: metaEnvironments(m)},
 	}
 }
 
+// queryInput is the body of both query actions: osquery.query fills UUID,
+// osquery.queryByTags fills Tags.
 type queryInput struct {
-	Env  string `json:"env"`
-	UUID string `json:"uuid"`
-	SQL  string `json:"sql"`
+	Env  string   `json:"env"`
+	UUID string   `json:"uuid"`
+	Tags []string `json:"tags"`
+	SQL  string   `json:"sql"`
+}
+
+// resolveClientEnv is the preamble both actions share: the live osctrl client
+// and the environment to run in (the form's, else venapce's default). It
+// finishes the job with the right error and returns ok=false when either is
+// missing.
+func resolveClientEnv(job *sdkv1.Job, m *osctrl.Manager, in queryInput) (cl *osctrl.Client, env string, ok bool) {
+	cl = m.Get()
+	if cl == nil {
+		job.DoneWithError("osctrl is not configured in venapce — connect it in Settings before running osquery")
+		return nil, "", false
+	}
+	env = strings.TrimSpace(in.Env)
+	if env == "" {
+		env = cl.Environment()
+	}
+	if env == "" {
+		job.DoneWithError("no environment: fill Environment on the node, or set a default osctrl environment in venapce Settings")
+		return nil, "", false
+	}
+	if strings.TrimSpace(in.SQL) == "" {
+		job.DoneWithError("missing required field: osquery SQL")
+		return nil, "", false
+	}
+	return cl, env, true
 }
 
 func queryAction(m *osctrl.Manager) sdkv1.Action {
 	return sdkv1.Action{
-		Method:      "osquery.query",
+		Method:      methodQuery,
 		Title:       "Run osquery on a node",
 		Description: "Dispatch an osquery SQL to one enrolled node via osctrl and return the rows it reports.",
 		Icon:        sdkv1.Icon{Icon: "mdi-database-search"},
@@ -84,79 +141,164 @@ func queryAction(m *osctrl.Manager) sdkv1.Action {
 			in := req.Body
 			flow.ResolveStruct(&job, &in)
 
-			cl := m.Get()
-			if cl == nil {
-				job.DoneWithError("osctrl is not configured in venapce — connect it in Settings before running osquery")
+			cl, env, ok := resolveClientEnv(&job, m, in)
+			if !ok {
 				return
 			}
-			env := strings.TrimSpace(in.Env)
-			if env == "" {
-				env = cl.Environment()
-			}
-			if env == "" {
-				job.DoneWithError("no environment: fill Environment on the node, or set a default osctrl environment in venapce Settings")
-				return
-			}
-			if strings.TrimSpace(in.UUID) == "" {
+			uuid := strings.TrimSpace(in.UUID)
+			if uuid == "" {
 				job.DoneWithError("missing required field: node (uuid) — press ↻ on the Node field to pick one")
-				return
-			}
-			if strings.TrimSpace(in.SQL) == "" {
-				job.DoneWithError("missing required field: osquery SQL")
 				return
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), jobTimeout)
 			defer cancel()
-			runQuery(ctx, &job, cl, env, in)
+			runQuery(ctx, &job, cl, env, target{
+				request: osctrl.DistributedQueryRequest{Query: in.SQL, UUIDList: []string{uuid}},
+				output:  map[string]any{"uuid": uuid},
+				waiting: "waiting for the node to report",
+			})
 		},
 	}
 }
 
+func queryByTagsAction(m *osctrl.Manager) sdkv1.Action {
+	return sdkv1.Action{
+		Method:      methodQueryByTags,
+		Title:       "Run osquery by tags",
+		Description: "Dispatch an osquery SQL to every active node carrying any of the selected osctrl tags and return the rows they report.",
+		Icon:        sdkv1.Icon{Icon: "mdi-tag-multiple"},
+		Form:        queryByTagsForm,
+		RequestHandler: func(job sdkv1.Job) {
+			req, err := sdkv1.CastRequestTo[queryInput](job.Req.Data)
+			if err != nil {
+				job.DoneWithError("invalid request body: " + err.Error())
+				return
+			}
+			in := req.Body
+			flow.ResolveStruct(&job, &in)
+
+			cl, env, ok := resolveClientEnv(&job, m, in)
+			if !ok {
+				return
+			}
+			tags := cleanTags(in.Tags)
+			if len(tags) == 0 {
+				job.DoneWithError("missing required field: tags — press ↻ on the Tags field and tick at least one")
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), jobTimeout)
+			defer cancel()
+
+			// osctrl ignores a tag it does not know rather than matching zero
+			// nodes, which would widen the target to the whole environment (see
+			// osctrl.DistributedQueryRequest). Refuse to dispatch on a name the
+			// environment does not have.
+			raw, err := cl.Tags(ctx, env)
+			if err != nil {
+				job.DoneWithError("cannot verify tags for " + env + ": " + err.Error())
+				return
+			}
+			if unknown := unknownTags(tags, tagOptions(raw)); len(unknown) > 0 {
+				job.DoneWithError(fmt.Sprintf("unknown tag(s) in %s: %s — press ↻ on the Tags field to pick from the environment's tags", env, strings.Join(unknown, ", ")))
+				return
+			}
+
+			runQuery(ctx, &job, cl, env, target{
+				request: osctrl.DistributedQueryRequest{Query: in.SQL, TagList: tags},
+				output:  map[string]any{"tags": tags},
+				waiting: "waiting for tagged nodes to report",
+			})
+		},
+	}
+}
+
+// target is what distinguishes the two actions once they reach the shared
+// run→poll→collect cycle: the osctrl targeting to dispatch, the identifying
+// fields to echo in the output, and the wording of the waiting frame.
+type target struct {
+	request osctrl.DistributedQueryRequest
+	output  map[string]any
+	waiting string
+}
+
 // runQuery dispatches the query, polls until every targeted node has reported (or
 // the job times out), then collects and commits the rows.
-func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string, in queryInput) {
-	job.Progress(15, sdkv1.Frame{Title: "dispatching", Content: preview(in.SQL)})
+func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string, t target) {
+	job.Progress(15, sdkv1.Frame{Title: "dispatching", Content: preview(t.request.Query)})
 
-	name, err := cl.RunQuery(ctx, env, osctrl.DistributedQueryRequest{
-		Query:    in.SQL,
-		UUIDList: []string{strings.TrimSpace(in.UUID)},
-	})
+	name, err := cl.RunQuery(ctx, env, t.request)
 	if err != nil {
 		job.DoneWithError("dispatch failed: " + err.Error())
 		return
 	}
 
-	job.Progress(35, sdkv1.Frame{Title: "waiting", Content: "query " + name + " — waiting for the node to report"})
+	job.Progress(35, sdkv1.Frame{Title: "waiting", Content: "query " + name + " — " + t.waiting})
 
 	status := pollUntilDone(ctx, job, cl, env, name)
 
 	job.Progress(85, sdkv1.Frame{Title: "collecting", Content: "reading results for " + name})
-	res, err := cl.QueryResults(ctx, env, name, 1, resultPageSize, "")
+	rows, total, err := collectRows(ctx, cl, env, name)
 	if err != nil {
 		job.DoneWithError("collecting results failed: " + err.Error())
 		return
 	}
-	decodeRowData(res.Items)
+	decodeRowData(rows)
 
 	out := map[string]any{
 		"queryName": name,
 		"env":       env,
-		"uuid":      strings.TrimSpace(in.UUID),
-		"rows":      res.Items,
-		"rowCount":  len(res.Items),
-		"columns":   columnsOf(res.Items),
+		"rows":      rows,
+		"rowCount":  len(rows),
+		"columns":   columnsOf(rows),
+	}
+	if total > len(rows) {
+		out["totalRows"] = total
+		out["truncated"] = true
+	}
+	for k, v := range t.output {
+		out[k] = v
 	}
 	if status != nil {
 		out["completed"] = status.Done()
 		out["expected"] = status.Expected
 		out["executions"] = status.Executions
 		out["errors"] = status.Errors
-		if !status.Done() {
+		switch {
+		case status.Expected == 0:
+			out["note"] = "the target resolved to no active nodes; nothing was queried"
+		case !status.Done():
 			out["note"] = "not all targeted nodes had reported before the timeout; rows are what arrived so far"
 		}
 	}
 	job.Done(out)
+}
+
+// collectRows pages through a query's results until osctrl has no more pages or
+// resultMaxRows is reached. It returns the rows plus osctrl's total count, so the
+// caller can tell when the cap cut the set short.
+func collectRows(ctx context.Context, cl *osctrl.Client, env, name string) ([]map[string]any, int, error) {
+	var rows []map[string]any
+	total := 0
+	for page := 1; ; page++ {
+		res, err := cl.QueryResults(ctx, env, name, page, resultPageSize, "")
+		if err != nil {
+			return nil, 0, err
+		}
+		rows = append(rows, res.Items...)
+		total = res.TotalItems
+		if len(res.Items) == 0 || page >= res.TotalPages || len(rows) >= resultMaxRows {
+			break
+		}
+	}
+	if len(rows) > resultMaxRows {
+		rows = rows[:resultMaxRows]
+	}
+	if total < len(rows) {
+		total = len(rows)
+	}
+	return rows, total, nil
 }
 
 // pollUntilDone re-reads the query's status until osctrl marks it done or the
@@ -172,6 +314,12 @@ func pollUntilDone(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env, 
 		if err == nil {
 			last = st
 			if st.Done() {
+				return last
+			}
+			// osctrl commits the query with its target set already resolved, so
+			// Expected==0 on the record means nothing matched (e.g. tags with no
+			// active nodes) — there is nobody to wait for.
+			if st.Expected == 0 {
 				return last
 			}
 			pct := 35
@@ -223,10 +371,47 @@ func metaNodes(m *osctrl.Manager) func(sdkv1.Request) any {
 	}
 }
 
-// metaEnvironments backs the Environment picker.
+// metaTags backs the Tags multi-select: list the environment's tags and
+// re-render the form with the tags field as a multi-select of them. Whatever
+// the user has already ticked is echoed back so it stays selected.
+func metaTags(m *osctrl.Manager) func(sdkv1.Request) any {
+	return func(req sdkv1.Request) any {
+		call := flow.DecodeMeta[map[string]any](req.Data)
+		cl := m.Get()
+		if cl == nil {
+			return formkit.Failure("osctrl is not configured in venapce — connect it in Settings").About("tags").Patch(nil)
+		}
+		env := flow.MetaString(call, "env")
+		if env == "" {
+			env = cl.Environment()
+		}
+		if env == "" {
+			return formkit.Warning("pick or type an Environment first, then press ↻ to list its tags").About("tags").Patch(nil)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), metaTimeout)
+		defer cancel()
+		raw, err := cl.Tags(ctx, env)
+		if err != nil {
+			return formkit.Failure("cannot list tags for %s: %s", env, err).About("tags").Patch(nil)
+		}
+		options := tagOptions(raw)
+		if len(options) == 0 {
+			return formkit.Warning("no tags in %s", env).About("tags").Patch(nil)
+		}
+		heading := formkit.Success("%d tag(s) in %s — tick the ones to target", len(options), env).About("tags")
+		return flow.ChooseMany(queryByTagsForm, "tags", options, formkit.FormData(call), heading)
+	}
+}
+
+// metaEnvironments backs the Environment picker on both forms. The button says
+// which action's form it sits on (`form`, from Field.Picks); that is the form
+// re-rendered with the drop-down — rebuilding the wrong one would swap the
+// dialog to the other action.
 func metaEnvironments(m *osctrl.Manager) func(sdkv1.Request) any {
 	return func(req sdkv1.Request) any {
 		call := flow.DecodeMeta[map[string]any](req.Data)
+		form := formFor(flow.MetaString(call, "form"))
 		cl := m.Get()
 		if cl == nil {
 			return formkit.Failure("osctrl is not configured in venapce — connect it in Settings").About("env").Patch(nil)
@@ -242,8 +427,17 @@ func metaEnvironments(m *osctrl.Manager) func(sdkv1.Request) any {
 			return formkit.Warning("no osctrl environments found").About("env").Patch(nil)
 		}
 		heading := formkit.Success("%d environment(s) — pick one", len(options)).About("env")
-		return formkit.Choose(queryForm, "env", options, formkit.FormData(call), heading)
+		return formkit.Choose(form, "env", options, formkit.FormData(call), heading)
 	}
+}
+
+// formFor maps an action method to its built form, defaulting to the per-node
+// query form for an older button that names none.
+func formFor(method string) sdkv1.FormBuilder {
+	if method == methodQueryByTags {
+		return queryByTagsForm
+	}
+	return queryForm
 }
 
 // nodeOptions turns an osctrl node array into picker options: the UUID is the
@@ -289,6 +483,65 @@ func envOptions(raw json.RawMessage) []formkit.Option {
 		options = append(options, formkit.Option{Value: name, Label: label})
 	}
 	return options
+}
+
+// tagOptions turns an osctrl tag array into picker options keyed by the tag
+// name (what tag_list expects). The label adds the description when there is
+// one, and marks tags osctrl created itself (auto_tag) so a user can tell
+// `linux` the platform tag from `linux` the hand-made one.
+func tagOptions(raw json.RawMessage) []formkit.Option {
+	var tags []map[string]any
+	if err := json.Unmarshal(raw, &tags); err != nil {
+		return nil
+	}
+	options := make([]formkit.Option, 0, len(tags))
+	for _, t := range tags {
+		name := str(t["name"])
+		if name == "" {
+			continue
+		}
+		label := name
+		if d := str(t["description"]); d != "" && d != name {
+			label += " · " + d
+		}
+		if auto, _ := t["auto_tag"].(bool); auto {
+			label += " (auto)"
+		}
+		options = append(options, formkit.Option{Value: name, Label: label})
+	}
+	return options
+}
+
+// cleanTags trims and de-duplicates the tag names a form submits, dropping
+// blanks, so the target list osctrl sees is exactly what the user meant.
+func cleanTags(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, t := range in {
+		t = strings.TrimSpace(t)
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	return out
+}
+
+// unknownTags returns the requested names that are not among the environment's
+// tags, in request order.
+func unknownTags(requested []string, known []formkit.Option) []string {
+	have := make(map[string]bool, len(known))
+	for _, o := range known {
+		have[o.Value] = true
+	}
+	var missing []string
+	for _, t := range requested {
+		if !have[t] {
+			missing = append(missing, t)
+		}
+	}
+	return missing
 }
 
 // decodeRowData unwraps each result row's osctrl-encoded "data" field. osctrl

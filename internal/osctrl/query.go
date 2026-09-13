@@ -20,8 +20,15 @@ import (
 
 // DistributedQueryRequest is the body of POST /queries/{env}. Only Query and one
 // targeting list are needed in practice; the zero value of the rest is omitted by
-// osctrl. Targeting is by environment / platform / node UUID / hostname — the
-// plugin sends a single UUID (the node the user picked).
+// osctrl. Targeting is by environment / platform / node UUID / hostname / tag.
+// osctrl INTERSECTS the lists it is given (environment narrows to that env's
+// active nodes; a tag list is the union of nodes carrying any of the tags), so
+// the plugin sends the env plus either one UUID or the tags the user picked.
+//
+// Beware an osctrl quirk: a list that resolves to zero nodes is ignored by the
+// intersection rather than emptying it, so a tag name osctrl does not know
+// silently widens the target to the whole environment. Callers must validate
+// tag names against Client.Tags before dispatching.
 type DistributedQueryRequest struct {
 	Query           string   `json:"query"`
 	EnvironmentList []string `json:"environment_list,omitempty"`
@@ -51,8 +58,9 @@ type DistributedQuery struct {
 
 // Done reports whether osctrl considers this distributed query finished: it has
 // completed or expired, or every expected node has reported (a success or an
-// error). Expected==0 means osctrl has not resolved the target set yet, so that
-// case is deliberately not "done".
+// error). Expected==0 is deliberately not "done" here: osctrl commits the query
+// with its targets already resolved, so a zero means nothing matched, and the
+// caller decides what to make of that (the plugin stops polling and says so).
 func (q *DistributedQuery) Done() bool {
 	if q.Completed || q.Expired {
 		return true

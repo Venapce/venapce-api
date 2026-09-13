@@ -165,6 +165,21 @@ func (c *Client) Nodes(ctx context.Context, env string) (json.RawMessage, error)
 	return raw, nil
 }
 
+// Tags returns an environment's tags as a flat array
+// (GET /api/v1/tags/{env}). Each entry is osctrl's AdminTag record — name,
+// description, color, tag_type, auto_tag — and backs the plugin's tag picker for
+// tag-targeted queries. A 404 (unknown environment) is normalized to [].
+func (c *Client) Tags(ctx context.Context, env string) (json.RawMessage, error) {
+	raw, err := c.getRaw(ctx, "/tags/"+url.PathEscape(env))
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			return json.RawMessage("[]"), nil
+		}
+		return nil, err
+	}
+	return raw, nil
+}
+
 // emptyNodesPage is the paged response shape returned for an environment osctrl
 // does not know (404), so the front renders an empty table rather than an error.
 const emptyNodesPage = `{"items":[],"page":1,"page_size":0,"total_items":0,"total_pages":1}`

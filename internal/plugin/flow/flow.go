@@ -1,8 +1,9 @@
 // Package flow holds the small helpers the venapce plugin's action and meta
 // handlers share: resolving {{$.path}} tokens against the running flow's scope,
-// and decoding the flat body a form's meta button sends. It imports sdkv1 but
-// nothing else in internal/plugin, so both the db and osquery modules can depend
-// on it without an import cycle.
+// decoding the flat body a form's meta button sends, and re-rendering a form
+// with a multi-select the SDK's formkit does not model. It imports sdkv1 and
+// formkit but nothing else in internal/plugin, so both the db and osquery
+// modules can depend on it without an import cycle.
 package flow
 
 import (
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Inflowenger/go-plugin-sdk/formkit"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 )
 
@@ -120,4 +122,84 @@ func MetaString(call map[string]any, key string) string {
 		return strings.TrimSpace(v)
 	}
 	return ""
+}
+
+// MetaStrings reads a string-array field from a meta call's flat body — the
+// current value of a multi-select — or nil if it is absent or not an array.
+// Non-string entries are skipped, blanks trimmed away.
+func MetaStrings(call map[string]any, key string) []string {
+	items, ok := call[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if s, ok := it.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, strings.TrimSpace(s))
+		}
+	}
+	return out
+}
+
+// ChooseMany is the multi-select counterpart of formkit.Choose: it answers a
+// picker lookup with the form re-rendered so that `target` — which must be an
+// array property — becomes a multi-select of the given options.
+//
+// formkit.Choices only knows how to turn a scalar into a drop-down (it sets
+// `oneOf` on the property itself). JSON Forms renders an array as a multi-select
+// when the property has `uniqueItems: true` and its `items` carry the `oneOf`
+// candidates, so this rewrites the property that way instead. Everything else
+// about the envelope — echoing the form's current data, the heading, the text
+// fallback when the form cannot be rebuilt — matches formkit.Choose.
+func ChooseMany(form sdkv1.FormBuilder, target string, options []formkit.Option, data map[string]any, heading formkit.Notification) any {
+	envelope, err := pickMany(form, target, options, data, heading)
+	if err != nil {
+		return formkit.Notification{
+			Severity: heading.Severity,
+			Field:    heading.Field,
+			Message:  strings.TrimSpace(strings.TrimRight(heading.Message, "\n") + "\n" + formkit.Lines(options)),
+		}.Patch(nil)
+	}
+	return envelope
+}
+
+func pickMany(form sdkv1.FormBuilder, target string, options []formkit.Option, data map[string]any, heading formkit.Notification) (map[string]any, error) {
+	if form.Jsonschema == "" {
+		return nil, fmt.Errorf("flow: cannot rebuild a form that has no schema")
+	}
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(form.Jsonschema), &schema); err != nil {
+		return nil, fmt.Errorf("flow: form schema does not parse: %w", err)
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	property, _ := properties[target].(map[string]any)
+	if property == nil || property["type"] != "array" {
+		return nil, fmt.Errorf("flow: the form has no array property %q to turn into a multi-select", target)
+	}
+	items, _ := property["items"].(map[string]any)
+	if items == nil {
+		items = map[string]any{"type": "string"}
+	}
+	choices := make([]any, 0, len(options))
+	for _, o := range options {
+		label := o.Label
+		if label == "" {
+			label = o.Value
+		}
+		choices = append(choices, map[string]any{"const": o.Value, "title": label})
+	}
+	items["oneOf"] = choices
+	delete(items, "enum")
+	property["items"] = items
+	property["uniqueItems"] = true
+
+	envelope := map[string]any{
+		"schema":   schema,
+		"uischema": form.Jsonui,
+		"data":     data,
+	}
+	if heading.Message != "" {
+		envelope[formkit.NotifKey] = heading
+	}
+	return envelope, nil
 }

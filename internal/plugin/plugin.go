@@ -5,7 +5,7 @@
 // database pool and osctrl client — so there is no settings profile to fill.
 //
 // Two modules hang off it: db (db.issues.* / db.stages.* writes) and osquery
-// (osquery.query plus its node/environment pickers).
+// (osquery.query / osquery.queryByTags plus their node/tag/environment pickers).
 package plugin
 
 import (
