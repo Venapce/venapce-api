@@ -11,18 +11,21 @@ import (
 )
 
 const createStage = `-- name: CreateStage :one
-INSERT INTO stage (title, summary, source, disposition, tags, data)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, title, summary, source, disposition, issue_id, tags, data, received_at, updated_at
+INSERT INTO stage (title, summary, source, origin, disposition, tags, ref, data, meta)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, title, summary, source, origin, disposition, finding_id, issue_id, tags, ref, data, meta, received_at, updated_at
 `
 
 type CreateStageParams struct {
 	Title       string          `json:"title"`
 	Summary     string          `json:"summary"`
 	Source      string          `json:"source"`
+	Origin      string          `json:"origin"`
 	Disposition string          `json:"disposition"`
 	Tags        []string        `json:"tags"`
+	Ref         json.RawMessage `json:"ref"`
 	Data        json.RawMessage `json:"data"`
+	Meta        json.RawMessage `json:"meta"`
 }
 
 func (q *Queries) CreateStage(ctx context.Context, arg CreateStageParams) (Stage, error) {
@@ -30,9 +33,12 @@ func (q *Queries) CreateStage(ctx context.Context, arg CreateStageParams) (Stage
 		arg.Title,
 		arg.Summary,
 		arg.Source,
+		arg.Origin,
 		arg.Disposition,
 		arg.Tags,
+		arg.Ref,
 		arg.Data,
+		arg.Meta,
 	)
 	var i Stage
 	err := row.Scan(
@@ -40,19 +46,31 @@ func (q *Queries) CreateStage(ctx context.Context, arg CreateStageParams) (Stage
 		&i.Title,
 		&i.Summary,
 		&i.Source,
+		&i.Origin,
 		&i.Disposition,
+		&i.FindingID,
 		&i.IssueID,
 		&i.Tags,
+		&i.Ref,
 		&i.Data,
+		&i.Meta,
 		&i.ReceivedAt,
 		&i.UpdatedAt,
 	)
 	return i, err
 }
 
+const deleteStage = `-- name: DeleteStage :exec
+DELETE FROM stage WHERE id = $1
+`
+
+func (q *Queries) DeleteStage(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, deleteStage, id)
+	return err
+}
+
 const getStage = `-- name: GetStage :one
-SELECT id, title, summary, source, disposition, issue_id, tags, data, received_at, updated_at
-FROM stage WHERE id = $1
+SELECT id, title, summary, source, origin, disposition, finding_id, issue_id, tags, ref, data, meta, received_at, updated_at FROM stage WHERE id = $1
 `
 
 func (q *Queries) GetStage(ctx context.Context, id int64) (Stage, error) {
@@ -63,10 +81,14 @@ func (q *Queries) GetStage(ctx context.Context, id int64) (Stage, error) {
 		&i.Title,
 		&i.Summary,
 		&i.Source,
+		&i.Origin,
 		&i.Disposition,
+		&i.FindingID,
 		&i.IssueID,
 		&i.Tags,
+		&i.Ref,
 		&i.Data,
+		&i.Meta,
 		&i.ReceivedAt,
 		&i.UpdatedAt,
 	)
@@ -74,14 +96,14 @@ func (q *Queries) GetStage(ctx context.Context, id int64) (Stage, error) {
 }
 
 const listStage = `-- name: ListStage :many
-SELECT id, title, summary, source, disposition, issue_id, tags, data, received_at, updated_at
-FROM stage
+SELECT id, title, summary, source, origin, disposition, finding_id, issue_id, tags, ref, data, meta, received_at, updated_at FROM stage
 WHERE ($1::text = '' OR disposition = $1::text)
   AND ($2::text = '' OR source = $2::text)
   AND ($3::text = ''
        OR title ILIKE '%' || $3::text || '%'
        OR summary ILIKE '%' || $3::text || '%'
-       OR source ILIKE '%' || $3::text || '%')
+       OR source ILIKE '%' || $3::text || '%'
+       OR origin ILIKE '%' || $3::text || '%')
 ORDER BY received_at DESC
 `
 
@@ -105,10 +127,14 @@ func (q *Queries) ListStage(ctx context.Context, arg ListStageParams) ([]Stage, 
 			&i.Title,
 			&i.Summary,
 			&i.Source,
+			&i.Origin,
 			&i.Disposition,
+			&i.FindingID,
 			&i.IssueID,
 			&i.Tags,
+			&i.Ref,
 			&i.Data,
+			&i.Meta,
 			&i.ReceivedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -123,29 +149,100 @@ func (q *Queries) ListStage(ctx context.Context, arg ListStageParams) ([]Stage, 
 }
 
 const promoteStage = `-- name: PromoteStage :one
-UPDATE stage SET disposition = 'promoted', issue_id = $2, updated_at = now()
-WHERE id = $1
-RETURNING id, title, summary, source, disposition, issue_id, tags, data, received_at, updated_at
+UPDATE stage
+   SET disposition = 'promoted',
+       finding_id = CASE WHEN $1::bigint = 0 THEN finding_id ELSE $1::bigint END,
+       issue_id   = CASE WHEN $2::bigint   = 0 THEN issue_id   ELSE $2::bigint   END,
+       updated_at = now()
+ WHERE id = $3
+RETURNING id, title, summary, source, origin, disposition, finding_id, issue_id, tags, ref, data, meta, received_at, updated_at
 `
 
 type PromoteStageParams struct {
-	ID      int64 `json:"id"`
-	IssueID int64 `json:"issueId"`
+	FindingID int64 `json:"findingId"`
+	IssueID   int64 `json:"issueId"`
+	ID        int64 `json:"id"`
 }
 
-// Mark a staged row as promoted and record the issue it became.
+// Mark a staged row as promoted and record what it became: a finding, an
+// issue, or both (0 leaves a link untouched).
 func (q *Queries) PromoteStage(ctx context.Context, arg PromoteStageParams) (Stage, error) {
-	row := q.db.QueryRow(ctx, promoteStage, arg.ID, arg.IssueID)
+	row := q.db.QueryRow(ctx, promoteStage, arg.FindingID, arg.IssueID, arg.ID)
 	var i Stage
 	err := row.Scan(
 		&i.ID,
 		&i.Title,
 		&i.Summary,
 		&i.Source,
+		&i.Origin,
 		&i.Disposition,
+		&i.FindingID,
 		&i.IssueID,
 		&i.Tags,
+		&i.Ref,
 		&i.Data,
+		&i.Meta,
+		&i.ReceivedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateStage = `-- name: UpdateStage :one
+UPDATE stage
+   SET title = $2, summary = $3, source = $4, origin = $5, disposition = $6,
+       finding_id = $7, issue_id = $8, tags = $9, ref = $10, data = $11, meta = $12,
+       updated_at = now()
+ WHERE id = $1
+RETURNING id, title, summary, source, origin, disposition, finding_id, issue_id, tags, ref, data, meta, received_at, updated_at
+`
+
+type UpdateStageParams struct {
+	ID          int64           `json:"id"`
+	Title       string          `json:"title"`
+	Summary     string          `json:"summary"`
+	Source      string          `json:"source"`
+	Origin      string          `json:"origin"`
+	Disposition string          `json:"disposition"`
+	FindingID   int64           `json:"findingId"`
+	IssueID     int64           `json:"issueId"`
+	Tags        []string        `json:"tags"`
+	Ref         json.RawMessage `json:"ref"`
+	Data        json.RawMessage `json:"data"`
+	Meta        json.RawMessage `json:"meta"`
+}
+
+// Full-row update of the editable columns; the handler merges a partial body
+// onto the current row first, so this always writes every field.
+func (q *Queries) UpdateStage(ctx context.Context, arg UpdateStageParams) (Stage, error) {
+	row := q.db.QueryRow(ctx, updateStage,
+		arg.ID,
+		arg.Title,
+		arg.Summary,
+		arg.Source,
+		arg.Origin,
+		arg.Disposition,
+		arg.FindingID,
+		arg.IssueID,
+		arg.Tags,
+		arg.Ref,
+		arg.Data,
+		arg.Meta,
+	)
+	var i Stage
+	err := row.Scan(
+		&i.ID,
+		&i.Title,
+		&i.Summary,
+		&i.Source,
+		&i.Origin,
+		&i.Disposition,
+		&i.FindingID,
+		&i.IssueID,
+		&i.Tags,
+		&i.Ref,
+		&i.Data,
+		&i.Meta,
 		&i.ReceivedAt,
 		&i.UpdatedAt,
 	)

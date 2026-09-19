@@ -11,20 +11,26 @@ import (
 )
 
 const createIssue = `-- name: CreateIssue :one
-INSERT INTO issues (title, summary, status, severity, tags, source, assignee, data)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, title, summary, status, severity, tags, source, assignee, data, created_at, updated_at
+INSERT INTO issues (title, summary, status, severity, tags, source, origin, assignee,
+                    finding_id, stage_id, ref, data, meta)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+RETURNING id, title, summary, status, severity, tags, source, origin, assignee, finding_id, stage_id, ref, data, meta, created_at, updated_at
 `
 
 type CreateIssueParams struct {
-	Title    string          `json:"title"`
-	Summary  string          `json:"summary"`
-	Status   string          `json:"status"`
-	Severity string          `json:"severity"`
-	Tags     []string        `json:"tags"`
-	Source   string          `json:"source"`
-	Assignee string          `json:"assignee"`
-	Data     json.RawMessage `json:"data"`
+	Title     string          `json:"title"`
+	Summary   string          `json:"summary"`
+	Status    string          `json:"status"`
+	Severity  string          `json:"severity"`
+	Tags      []string        `json:"tags"`
+	Source    string          `json:"source"`
+	Origin    string          `json:"origin"`
+	Assignee  string          `json:"assignee"`
+	FindingID int64           `json:"findingId"`
+	StageID   int64           `json:"stageId"`
+	Ref       json.RawMessage `json:"ref"`
+	Data      json.RawMessage `json:"data"`
+	Meta      json.RawMessage `json:"meta"`
 }
 
 func (q *Queries) CreateIssue(ctx context.Context, arg CreateIssueParams) (Issue, error) {
@@ -35,8 +41,13 @@ func (q *Queries) CreateIssue(ctx context.Context, arg CreateIssueParams) (Issue
 		arg.Severity,
 		arg.Tags,
 		arg.Source,
+		arg.Origin,
 		arg.Assignee,
+		arg.FindingID,
+		arg.StageID,
+		arg.Ref,
 		arg.Data,
+		arg.Meta,
 	)
 	var i Issue
 	err := row.Scan(
@@ -47,17 +58,30 @@ func (q *Queries) CreateIssue(ctx context.Context, arg CreateIssueParams) (Issue
 		&i.Severity,
 		&i.Tags,
 		&i.Source,
+		&i.Origin,
 		&i.Assignee,
+		&i.FindingID,
+		&i.StageID,
+		&i.Ref,
 		&i.Data,
+		&i.Meta,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
 	return i, err
 }
 
+const deleteIssue = `-- name: DeleteIssue :exec
+DELETE FROM issues WHERE id = $1
+`
+
+func (q *Queries) DeleteIssue(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, deleteIssue, id)
+	return err
+}
+
 const getIssue = `-- name: GetIssue :one
-SELECT id, title, summary, status, severity, tags, source, assignee, data, created_at, updated_at
-FROM issues WHERE id = $1
+SELECT id, title, summary, status, severity, tags, source, origin, assignee, finding_id, stage_id, ref, data, meta, created_at, updated_at FROM issues WHERE id = $1
 `
 
 func (q *Queries) GetIssue(ctx context.Context, id int64) (Issue, error) {
@@ -71,8 +95,13 @@ func (q *Queries) GetIssue(ctx context.Context, id int64) (Issue, error) {
 		&i.Severity,
 		&i.Tags,
 		&i.Source,
+		&i.Origin,
 		&i.Assignee,
+		&i.FindingID,
+		&i.StageID,
+		&i.Ref,
 		&i.Data,
+		&i.Meta,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -105,16 +134,18 @@ func (q *Queries) IssueTags(ctx context.Context) ([]string, error) {
 }
 
 const listIssues = `-- name: ListIssues :many
-SELECT id, title, summary, status, severity, tags, source, assignee, data, created_at, updated_at
-FROM issues
+SELECT id, title, summary, status, severity, tags, source, origin, assignee, finding_id, stage_id, ref, data, meta, created_at, updated_at FROM issues
 WHERE (cardinality($1::text[]) = 0
        OR ($2::bool AND tags @> $1::text[])
        OR (NOT $2::bool AND tags && $1::text[]))
   AND ($3::text = '' OR status = $3::text)
-  AND ($4::text = ''
-       OR title ILIKE '%' || $4::text || '%'
-       OR summary ILIKE '%' || $4::text || '%'
-       OR source ILIKE '%' || $4::text || '%')
+  AND ($4::text = '' OR severity = $4::text)
+  AND ($5::text = ''
+       OR title ILIKE '%' || $5::text || '%'
+       OR summary ILIKE '%' || $5::text || '%'
+       OR source ILIKE '%' || $5::text || '%'
+       OR origin ILIKE '%' || $5::text || '%'
+       OR assignee ILIKE '%' || $5::text || '%')
 ORDER BY created_at DESC
 `
 
@@ -122,6 +153,7 @@ type ListIssuesParams struct {
 	Tags     []string `json:"tags"`
 	MatchAll bool     `json:"matchAll"`
 	Status   string   `json:"status"`
+	Severity string   `json:"severity"`
 	Search   string   `json:"search"`
 }
 
@@ -132,6 +164,7 @@ func (q *Queries) ListIssues(ctx context.Context, arg ListIssuesParams) ([]Issue
 		arg.Tags,
 		arg.MatchAll,
 		arg.Status,
+		arg.Severity,
 		arg.Search,
 	)
 	if err != nil {
@@ -149,8 +182,13 @@ func (q *Queries) ListIssues(ctx context.Context, arg ListIssuesParams) ([]Issue
 			&i.Severity,
 			&i.Tags,
 			&i.Source,
+			&i.Origin,
 			&i.Assignee,
+			&i.FindingID,
+			&i.StageID,
+			&i.Ref,
 			&i.Data,
+			&i.Meta,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -162,4 +200,69 @@ func (q *Queries) ListIssues(ctx context.Context, arg ListIssuesParams) ([]Issue
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateIssue = `-- name: UpdateIssue :one
+UPDATE issues
+   SET title = $2, summary = $3, status = $4, severity = $5, tags = $6, source = $7,
+       origin = $8, assignee = $9, finding_id = $10, stage_id = $11,
+       ref = $12, data = $13, meta = $14, updated_at = now()
+ WHERE id = $1
+RETURNING id, title, summary, status, severity, tags, source, origin, assignee, finding_id, stage_id, ref, data, meta, created_at, updated_at
+`
+
+type UpdateIssueParams struct {
+	ID        int64           `json:"id"`
+	Title     string          `json:"title"`
+	Summary   string          `json:"summary"`
+	Status    string          `json:"status"`
+	Severity  string          `json:"severity"`
+	Tags      []string        `json:"tags"`
+	Source    string          `json:"source"`
+	Origin    string          `json:"origin"`
+	Assignee  string          `json:"assignee"`
+	FindingID int64           `json:"findingId"`
+	StageID   int64           `json:"stageId"`
+	Ref       json.RawMessage `json:"ref"`
+	Data      json.RawMessage `json:"data"`
+	Meta      json.RawMessage `json:"meta"`
+}
+
+func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, updateIssue,
+		arg.ID,
+		arg.Title,
+		arg.Summary,
+		arg.Status,
+		arg.Severity,
+		arg.Tags,
+		arg.Source,
+		arg.Origin,
+		arg.Assignee,
+		arg.FindingID,
+		arg.StageID,
+		arg.Ref,
+		arg.Data,
+		arg.Meta,
+	)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.Title,
+		&i.Summary,
+		&i.Status,
+		&i.Severity,
+		&i.Tags,
+		&i.Source,
+		&i.Origin,
+		&i.Assignee,
+		&i.FindingID,
+		&i.StageID,
+		&i.Ref,
+		&i.Data,
+		&i.Meta,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

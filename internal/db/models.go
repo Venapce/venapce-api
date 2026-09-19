@@ -28,6 +28,28 @@ type Dashboard struct {
 	UpdatedAt time.Time       `json:"updatedAt"`
 }
 
+type Finding struct {
+	ID          int64           `json:"id"`
+	Title       string          `json:"title"`
+	Summary     string          `json:"summary"`
+	Status      string          `json:"status"`
+	Severity    string          `json:"severity"`
+	Confidence  string          `json:"confidence"`
+	Category    string          `json:"category"`
+	Tags        []string        `json:"tags"`
+	Source      string          `json:"source"`
+	Origin      string          `json:"origin"`
+	Target      string          `json:"target"`
+	Fingerprint string          `json:"fingerprint"`
+	StageID     int64           `json:"stageId"`
+	IssueID     int64           `json:"issueId"`
+	Ref         json.RawMessage `json:"ref"`
+	Data        json.RawMessage `json:"data"`
+	Meta        json.RawMessage `json:"meta"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
 type Issue struct {
 	ID        int64           `json:"id"`
 	Title     string          `json:"title"`
@@ -36,8 +58,13 @@ type Issue struct {
 	Severity  string          `json:"severity"`
 	Tags      []string        `json:"tags"`
 	Source    string          `json:"source"`
+	Origin    string          `json:"origin"`
 	Assignee  string          `json:"assignee"`
+	FindingID int64           `json:"findingId"`
+	StageID   int64           `json:"stageId"`
+	Ref       json.RawMessage `json:"ref"`
 	Data      json.RawMessage `json:"data"`
+	Meta      json.RawMessage `json:"meta"`
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
 }
@@ -53,10 +80,14 @@ type Stage struct {
 	Title       string          `json:"title"`
 	Summary     string          `json:"summary"`
 	Source      string          `json:"source"`
+	Origin      string          `json:"origin"`
 	Disposition string          `json:"disposition"`
+	FindingID   int64           `json:"findingId"`
 	IssueID     int64           `json:"issueId"`
 	Tags        []string        `json:"tags"`
+	Ref         json.RawMessage `json:"ref"`
 	Data        json.RawMessage `json:"data"`
+	Meta        json.RawMessage `json:"meta"`
 	ReceivedAt  time.Time       `json:"receivedAt"`
 	UpdatedAt   time.Time       `json:"updatedAt"`
 }

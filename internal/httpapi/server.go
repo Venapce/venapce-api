@@ -146,13 +146,29 @@ func (s *Server) App() *fiber.App {
 	osc.Get("/enroll", s.osctrlEnroll)
 	osc.Post("/enroll/actions", s.osctrlEnrollAction)
 
-	// Stage → Issues pipeline (rows produced/advanced by FloMorphic).
+	// Stage → Findings → Issues pipeline (rows produced/advanced by FloMorphic;
+	// every level is optional — a flow may write to any of the three directly).
 	api.Get("/stage", s.listStage)
 	api.Post("/stage", s.createStage)
-	api.Post("/stage/:id/promote", s.promoteStage)
+	api.Get("/stage/:id", s.getStage)
+	api.Put("/stage/:id", s.updateStage)
+	api.Delete("/stage/:id", s.deleteStage)
+	api.Post("/stage/:id/promote", s.promoteStage) // ?to=finding|issue
+
+	api.Get("/findings", s.listFindings)
+	api.Get("/findings/tags", s.findingTags)
+	api.Post("/findings", s.createFinding)
+	api.Get("/findings/:id", s.getFinding)
+	api.Put("/findings/:id", s.updateFinding)
+	api.Delete("/findings/:id", s.deleteFinding)
+	api.Post("/findings/:id/promote", s.promoteFinding)
+
 	api.Get("/issues", s.listIssues)
 	api.Get("/issues/tags", s.issueTags)
 	api.Post("/issues", s.createIssue)
+	api.Get("/issues/:id", s.getIssue)
+	api.Put("/issues/:id", s.updateIssue)
+	api.Delete("/issues/:id", s.deleteIssue)
 
 	return app
 }

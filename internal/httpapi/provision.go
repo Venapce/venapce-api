@@ -9,13 +9,14 @@ import (
 )
 
 // supersetDataTables are the Venapce data tables that should show up in Superset
-// as datasets, ready to chart against. These are the two data tables (stage and
-// issues); the settings/charts/dashboards tables are backend metadata only.
-var supersetDataTables = []string{"stage", "issues"}
+// as datasets, ready to chart against. These are the three pipeline tables
+// (stage, findings, issues); the settings/charts/dashboards tables are backend
+// metadata only.
+var supersetDataTables = []string{"stage", "findings", "issues"}
 
 // StartSupersetProvisioning kicks off, in the background, the one-time wiring of
 // Superset: register the venapce Postgres as a database connection and add the
-// data tables (stage, issues) as datasets. It never blocks boot — the app listens
+// data tables (stage, findings, issues) as datasets. It never blocks boot — the app listens
 // immediately and this reports its progress through the logs. If Superset is not
 // reachable yet (still starting, or not configured), it retries for a while and
 // then gives up quietly.

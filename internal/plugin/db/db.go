@@ -1,6 +1,9 @@
 // Package db is the venapce plugin's database module. It exposes upsert and
-// update actions for venapce's two data tables — issues and stage — under the
-// `db.issues.*` and `db.stages.*` method prefixes.
+// update actions for venapce's three pipeline tables — stage, findings and
+// issues — under the `db.stages.*`, `db.findings.*` and `db.issues.*` method
+// prefixes. The pipeline between them is optional: a flow writes to whichever
+// level its rules decide (raw data → stage, a conclusion → findings, something
+// to act on → issues), in any order.
 //
 // Unlike a general Postgres plugin, this one carries no connection settings: the
 // venapce pgx pool is injected, because the database venapce owns is the only one
@@ -8,7 +11,7 @@
 //
 // The writable column set of each table is not hardcoded here — it is derived by
 // reflecting over the sqlc-generated model in internal/db (model.Issue,
-// model.Stage). So when the issues/stage schema changes and sqlc regenerates
+// model.Finding, model.Stage). So when a table's schema changes and sqlc regenerates
 // those structs, this module follows automatically: a new column of a supported
 // type becomes a writable field with no edit here, and RETURNING * carries it
 // back in the output. Column names still come only from the generated model,
@@ -71,8 +74,9 @@ type table struct {
 // The tables the module writes, each bound to its sqlc-generated model so the
 // writable columns track the schema. tableFrom reflects the model at init.
 var (
-	issues = tableFrom("db.issues", "issue", "issues", model.Issue{})
-	stages = tableFrom("db.stages", "stage row", "stage", model.Stage{})
+	issues   = tableFrom("db.issues", "issue", "issues", model.Issue{})
+	findings = tableFrom("db.findings", "finding", "findings", model.Finding{})
+	stages   = tableFrom("db.stages", "stage row", "stage", model.Stage{})
 )
 
 // tableFrom builds a table by reflecting over a generated model value. Every
@@ -161,12 +165,15 @@ func camelToSnake(s string) string {
 // an upsert (insert, or update on an id clash) and an update (by id).
 func Actions(pool *pgxpool.Pool) []sdkv1.Action {
 	issues.form, issues.updateFm = buildForms(issues)
+	findings.form, findings.updateFm = buildForms(findings)
 	stages.form, stages.updateFm = buildForms(stages)
 	return []sdkv1.Action{
-		upsertAction(pool, issues),
-		updateAction(pool, issues),
 		upsertAction(pool, stages),
 		updateAction(pool, stages),
+		upsertAction(pool, findings),
+		updateAction(pool, findings),
+		upsertAction(pool, issues),
+		updateAction(pool, issues),
 	}
 }
 

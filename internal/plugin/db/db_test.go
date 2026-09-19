@@ -9,7 +9,7 @@ import (
 // buildForms is exercised for every table so a malformed form (which panics in
 // formkit.Build) is caught here rather than as a dialog that will not open.
 func TestFormsParse(t *testing.T) {
-	for _, tbl := range []table{issues, stages} {
+	for _, tbl := range []table{issues, findings, stages} {
 		up, upd := buildForms(tbl)
 		for _, f := range []struct {
 			name           string
@@ -48,18 +48,25 @@ func TestColumnsDerivedFromModel(t *testing.T) {
 		}
 		return out
 	}
-	wantIssues := []string{"title", "summary", "status", "severity", "tags", "source", "assignee", "data"}
+	wantIssues := []string{"title", "summary", "status", "severity", "tags", "source", "origin", "assignee",
+		"finding_id", "stage_id", "ref", "data", "meta"}
 	if g := got(issues); strings.Join(g, ",") != strings.Join(wantIssues, ",") {
 		t.Errorf("issues columns = %v, want %v", g, wantIssues)
 	}
-	wantStages := []string{"title", "summary", "source", "disposition", "issue_id", "tags", "data"}
+	wantFindings := []string{"title", "summary", "status", "severity", "confidence", "category", "tags",
+		"source", "origin", "target", "fingerprint", "stage_id", "issue_id", "ref", "data", "meta"}
+	if g := got(findings); strings.Join(g, ",") != strings.Join(wantFindings, ",") {
+		t.Errorf("findings columns = %v, want %v", g, wantFindings)
+	}
+	wantStages := []string{"title", "summary", "source", "origin", "disposition", "finding_id", "issue_id",
+		"tags", "ref", "data", "meta"}
 	if g := got(stages); strings.Join(g, ",") != strings.Join(wantStages, ",") {
 		t.Errorf("stage columns = %v, want %v", g, wantStages)
 	}
-	if !issues.hasUpdatedAt || !stages.hasUpdatedAt {
-		t.Error("both tables have updated_at and should stamp it")
+	if !issues.hasUpdatedAt || !findings.hasUpdatedAt || !stages.hasUpdatedAt {
+		t.Error("all three tables have updated_at and should stamp it")
 	}
-	for _, tbl := range []table{issues, stages} {
+	for _, tbl := range []table{issues, findings, stages} {
 		for _, c := range tbl.columns {
 			if c.name == "id" || strings.HasSuffix(c.name, "_at") {
 				t.Errorf("%s: managed column %q must not be writable", tbl.name, c.name)
