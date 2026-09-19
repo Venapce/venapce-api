@@ -185,3 +185,49 @@ func TestEnvironmentButtonNamesItsOwnForm(t *testing.T) {
 		t.Error("formFor must map the method to its own form and default to the node form")
 	}
 }
+
+// A failed execution comes back from osctrl as a result row with status != 0
+// and osquery's message inside the data envelope; it must leave `rows` and
+// surface as a failure the flow context can read.
+func TestSplitFailuresPullsErroredExecutionsOutOfRows(t *testing.T) {
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(`[
+		{"uuid":"NODE-A","name":"q","status":0,"data":"{\"name\":\"q\",\"result\":[{\"pid\":\"1\"}],\"status\":0,\"message\":\"\"}"},
+		{"uuid":"NODE-B","name":"q","status":1,"data":"{\"name\":\"q\",\"result\":[],\"status\":1,\"message\":\"no such table: prcesses\"}"},
+		{"uuid":"NODE-C","name":"q","data":"{\"name\":\"q\",\"result\":[],\"status\":2,\"message\":\"no such column: x\"}"}
+	]`), &rows); err != nil {
+		t.Fatal(err)
+	}
+	decodeRowData(rows)
+	ok, failures := splitFailures(rows)
+
+	if len(ok) != 1 || ok[0]["uuid"] != "NODE-A" {
+		t.Fatalf("want only NODE-A as data, got %v", ok)
+	}
+	if len(failures) != 2 {
+		t.Fatalf("want 2 failures, got %v", failures)
+	}
+	if failures[0]["uuid"] != "NODE-B" || failures[0]["status"] != 1 || failures[0]["message"] != "no such table: prcesses" {
+		t.Errorf("failure from top-level status wrong: %v", failures[0])
+	}
+	if failures[1]["uuid"] != "NODE-C" || failures[1]["status"] != 2 || failures[1]["message"] != "no such column: x" {
+		t.Errorf("failure from envelope status wrong: %v", failures[1])
+	}
+
+	if s := failureSummary(2, failures); s != "osquery failed on 2 node(s): no such table: prcesses; no such column: x" {
+		t.Errorf("unexpected summary %q", s)
+	}
+	if s := failureSummary(1, nil); s != "osquery failed on 1 node(s): osctrl recorded no error message; check the query in the osctrl panel" {
+		t.Errorf("unexpected message-less summary %q", s)
+	}
+}
+
+func TestSplitFailuresKeepsRowsNonNil(t *testing.T) {
+	ok, failures := splitFailures([]map[string]any{{"uuid": "N", "status": float64(1), "data": map[string]any{"message": "boom"}}})
+	if ok == nil || len(ok) != 0 {
+		t.Errorf("rows must be an empty slice, not nil: %#v", ok)
+	}
+	if len(failures) != 1 || failures[0]["message"] != "boom" {
+		t.Errorf("unexpected failures %v", failures)
+	}
+}

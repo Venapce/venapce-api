@@ -244,7 +244,21 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 		job.DoneWithError("collecting results failed: " + err.Error())
 		return
 	}
+	// osctrl bumps the query's counters before it has written the node's
+	// result row (the write is a goroutine), so a read right after the status
+	// flips to done can land a row short — typically the one carrying an error
+	// message. Give it one more chance to appear before reporting.
+	if status != nil && total < status.Executions+status.Errors {
+		select {
+		case <-ctx.Done():
+		case <-time.After(pollEvery):
+			if again, againTotal, err := collectRows(ctx, cl, env, name); err == nil {
+				rows, total = again, againTotal
+			}
+		}
+	}
 	decodeRowData(rows)
+	rows, failures := splitFailures(rows)
 
 	out := map[string]any{
 		"queryName": name,
@@ -253,26 +267,119 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 		"rowCount":  len(rows),
 		"columns":   columnsOf(rows),
 	}
-	if total > len(rows) {
+	if total > len(rows)+len(failures) {
 		out["totalRows"] = total
 		out["truncated"] = true
 	}
 	for k, v := range t.output {
 		out[k] = v
 	}
+	// How many nodes ran the SQL and how many rejected it. osctrl's counters
+	// are authoritative when the status read worked; otherwise fall back to
+	// what the result rows say.
+	succeeded, failed := len(rows), len(failures)
 	if status != nil {
+		succeeded, failed = status.Executions, status.Errors
 		out["completed"] = status.Done()
 		out["expected"] = status.Expected
 		out["executions"] = status.Executions
-		out["errors"] = status.Errors
-		switch {
-		case status.Expected == 0:
-			out["note"] = "the target resolved to no active nodes; nothing was queried"
-		case !status.Done():
-			out["note"] = "not all targeted nodes had reported before the timeout; rows are what arrived so far"
-		}
+	}
+	out["errors"] = failed
+	if len(failures) > 0 {
+		out["failures"] = failures
+	}
+	// A query every node rejected is a failed action, not a result with zero
+	// rows: fail the job with osquery's own message (typically a bad table or
+	// column) so a flow or assistant reading the context sees why, instead of
+	// a green run whose only symptom is a non-zero `errors` count.
+	if succeeded == 0 && failed > 0 {
+		job.DoneWithErrorData(failureSummary(failed, failures), out)
+		return
+	}
+	switch {
+	case status != nil && status.Expected == 0:
+		out["note"] = "the target resolved to no active nodes; nothing was queried"
+	case failed > 0:
+		out["note"] = fmt.Sprintf("%d node(s) failed to run the query; see failures", failed)
+	case status != nil && !status.Done():
+		out["note"] = "not all targeted nodes had reported before the timeout; rows are what arrived so far"
 	}
 	job.Done(out)
+}
+
+// splitFailures separates the result rows that are really execution errors from
+// the data. osctrl records a node's failed run as a row like any other, with
+// `status` != 0 and osquery's message inside the decoded data envelope
+// ({"result":[],"status":1,"message":"no such table: …"}), so left in `rows` it
+// reads as one more result. Each failure is returned as {uuid, status, message}.
+func splitFailures(rows []map[string]any) (ok []map[string]any, failures []map[string]any) {
+	for _, row := range rows {
+		st := rowStatus(row)
+		if st == 0 {
+			ok = append(ok, row)
+			continue
+		}
+		f := map[string]any{"uuid": str(row["uuid"]), "status": st}
+		if data, isMap := row["data"].(map[string]any); isMap {
+			if msg := str(data["message"]); msg != "" {
+				f["message"] = msg
+			}
+		}
+		failures = append(failures, f)
+	}
+	if ok == nil {
+		ok = []map[string]any{}
+	}
+	return ok, failures
+}
+
+// rowStatus reads a result row's osquery exit status: the top-level `status`
+// osctrl stores next to the row, else the one inside the decoded data envelope.
+// JSON numbers arrive as float64; anything unreadable counts as success.
+func rowStatus(row map[string]any) int {
+	if st, ok := numInt(row["status"]); ok {
+		return st
+	}
+	if data, ok := row["data"].(map[string]any); ok {
+		if st, ok := numInt(data["status"]); ok {
+			return st
+		}
+	}
+	return 0
+}
+
+func numInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case json.Number:
+		i, err := n.Int64()
+		return int(i), err == nil
+	}
+	return 0, false
+}
+
+// failureSummary is the job's error line when every node rejected the query:
+// the count plus the distinct messages osquery gave, so the reason (a bad table
+// or column, usually) is readable without opening the payload.
+func failureSummary(failed int, failures []map[string]any) string {
+	seen := map[string]bool{}
+	var msgs []string
+	for _, f := range failures {
+		m := str(f["message"])
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		msgs = append(msgs, m)
+	}
+	head := fmt.Sprintf("osquery failed on %d node(s)", failed)
+	if len(msgs) == 0 {
+		return head + ": osctrl recorded no error message; check the query in the osctrl panel"
+	}
+	return head + ": " + strings.Join(msgs, "; ")
 }
 
 // collectRows pages through a query's results until osctrl has no more pages or
