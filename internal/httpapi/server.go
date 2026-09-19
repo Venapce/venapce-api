@@ -170,6 +170,19 @@ func (s *Server) App() *fiber.App {
 	api.Put("/issues/:id", s.updateIssue)
 	api.Delete("/issues/:id", s.deleteIssue)
 
+	// Activities: the history of a pipeline row (edits, promotions) and the
+	// outcome of every FloMorphic flow run on it. /flows lists what can be run.
+	api.Get("/flows", s.listFlows)
+	api.Get("/activities", s.listActivities)
+	api.Get("/activities/tags", s.activityTags)
+	api.Post("/activities", s.createActivity)
+	api.Post("/activities/run", s.runFlow)
+	api.Get("/activities/:id", s.getActivity)
+	api.Put("/activities/:id", s.updateActivity)
+	api.Delete("/activities/:id", s.deleteActivity)
+	api.Post("/activities/:id/sync", s.syncActivityNow)
+	api.Post("/activities/:id/stop", s.stopActivity)
+
 	return app
 }
 

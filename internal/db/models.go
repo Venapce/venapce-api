@@ -9,6 +9,34 @@ import (
 	"time"
 )
 
+type Activity struct {
+	ID          int64           `json:"id"`
+	SubjectKind string          `json:"subjectKind"`
+	SubjectID   int64           `json:"subjectId"`
+	Kind        string          `json:"kind"`
+	Status      string          `json:"status"`
+	Title       string          `json:"title"`
+	Description string          `json:"description"`
+	Remediation string          `json:"remediation"`
+	Proof       string          `json:"proof"`
+	Facts       json.RawMessage `json:"facts"`
+	Tags        []string        `json:"tags"`
+	Origin      string          `json:"origin"`
+	FlowID      string          `json:"flowId"`
+	FlowTitle   string          `json:"flowTitle"`
+	ProcessID   int64           `json:"processId"`
+	Pid         string          `json:"pid"`
+	ContextID   string          `json:"contextId"`
+	Error       string          `json:"error"`
+	Ref         json.RawMessage `json:"ref"`
+	Data        json.RawMessage `json:"data"`
+	Meta        json.RawMessage `json:"meta"`
+	StartedAt   *time.Time      `json:"startedAt"`
+	FinishedAt  *time.Time      `json:"finishedAt"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
 type Chart struct {
 	ID           int64           `json:"id"`
 	Title        string          `json:"title"`

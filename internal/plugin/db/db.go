@@ -1,7 +1,7 @@
 // Package db is the venapce plugin's database module. It exposes upsert and
 // update actions for venapce's three pipeline tables — stage, findings and
 // issues — under the `db.stages.*`, `db.findings.*` and `db.issues.*` method
-// prefixes. The pipeline between them is optional: a flow writes to whichever
+// prefixes, and for their history / flow-outcome table under `db.activities.*`. The pipeline between them is optional: a flow writes to whichever
 // level its rules decide (raw data → stage, a conclusion → findings, something
 // to act on → issues), in any order.
 //
@@ -77,6 +77,10 @@ var (
 	issues   = tableFrom("db.issues", "issue", "issues", model.Issue{})
 	findings = tableFrom("db.findings", "finding", "findings", model.Finding{})
 	stages   = tableFrom("db.stages", "stage row", "stage", model.Stage{})
+	// Activities: a flow writes its outcome onto the activity venapce opened for
+	// the run (id = {{$.activity.id}}), or records an activity of its own on any
+	// subject row (subject_kind + subject_id).
+	activities = tableFrom("db.activities", "activity", "activities", model.Activity{})
 )
 
 // tableFrom builds a table by reflecting over a generated model value. Every
@@ -167,6 +171,7 @@ func Actions(pool *pgxpool.Pool) []sdkv1.Action {
 	issues.form, issues.updateFm = buildForms(issues)
 	findings.form, findings.updateFm = buildForms(findings)
 	stages.form, stages.updateFm = buildForms(stages)
+	activities.form, activities.updateFm = buildForms(activities)
 	return []sdkv1.Action{
 		upsertAction(pool, stages),
 		updateAction(pool, stages),
@@ -174,6 +179,8 @@ func Actions(pool *pgxpool.Pool) []sdkv1.Action {
 		updateAction(pool, findings),
 		upsertAction(pool, issues),
 		updateAction(pool, issues),
+		upsertAction(pool, activities),
+		updateAction(pool, activities),
 	}
 }
 

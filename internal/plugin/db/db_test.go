@@ -9,7 +9,7 @@ import (
 // buildForms is exercised for every table so a malformed form (which panics in
 // formkit.Build) is caught here rather than as a dialog that will not open.
 func TestFormsParse(t *testing.T) {
-	for _, tbl := range []table{issues, findings, stages} {
+	for _, tbl := range []table{issues, findings, stages, activities} {
 		up, upd := buildForms(tbl)
 		for _, f := range []struct {
 			name           string
@@ -63,10 +63,18 @@ func TestColumnsDerivedFromModel(t *testing.T) {
 	if g := got(stages); strings.Join(g, ",") != strings.Join(wantStages, ",") {
 		t.Errorf("stage columns = %v, want %v", g, wantStages)
 	}
-	if !issues.hasUpdatedAt || !findings.hasUpdatedAt || !stages.hasUpdatedAt {
-		t.Error("all three tables have updated_at and should stamp it")
+	// Activities: the nullable started_at / finished_at are *time.Time in the
+	// model — DB-managed from the API's side, so they must not become fields.
+	wantActivities := []string{"subject_kind", "subject_id", "kind", "status", "title", "description",
+		"remediation", "proof", "facts", "tags", "origin", "flow_id", "flow_title", "process_id", "pid",
+		"context_id", "error", "ref", "data", "meta"}
+	if g := got(activities); strings.Join(g, ",") != strings.Join(wantActivities, ",") {
+		t.Errorf("activities columns = %v, want %v", g, wantActivities)
 	}
-	for _, tbl := range []table{issues, findings, stages} {
+	if !issues.hasUpdatedAt || !findings.hasUpdatedAt || !stages.hasUpdatedAt || !activities.hasUpdatedAt {
+		t.Error("all tables have updated_at and should stamp it")
+	}
+	for _, tbl := range []table{issues, findings, stages, activities} {
 		for _, c := range tbl.columns {
 			if c.name == "id" || strings.HasSuffix(c.name, "_at") {
 				t.Errorf("%s: managed column %q must not be writable", tbl.name, c.name)

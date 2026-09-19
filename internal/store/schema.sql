@@ -147,3 +147,59 @@ CREATE INDEX IF NOT EXISTS idx_findings_tags ON findings USING gin (tags);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings (status);
 CREATE INDEX IF NOT EXISTS idx_findings_fingerprint ON findings (fingerprint);
 CREATE INDEX IF NOT EXISTS idx_findings_created_at ON findings (created_at DESC);
+
+-- Activities: the history of a pipeline row. Every row of stage / findings /
+-- issues is changed by hand and — above all — by FloMorphic flows, and each of
+-- those changes is recorded here against its subject (`subject_kind` +
+-- `subject_id`), so a row's timeline is readable and every flow outcome keeps
+-- its meaning.
+--
+-- A `run` activity is one flow executed on one row: the row goes to FloMorphic
+-- as the run's context document, the process id / pid / context id are kept
+-- here, and once the run ends its OUTCOME is lifted into the typed columns:
+--
+--   title / description   what the flow concluded, in words
+--   remediation           what to do about it
+--   proof                 the evidence the conclusion rests on
+--   facts                 [{"k":"severity","v":"low"}, …] — typed key/values
+--                         the front can identify and render (severity, cve,
+--                         package, version, score …)
+--   tags                  labels the flow attached
+--   data                  the run's full output document, any shape
+--
+-- `edit` / `promote` / `create` activities record manual and pipeline changes
+-- (`ref` holds the field diff). A later flow can read a row's earlier
+-- activities (they travel in the context as `history`), so outcomes compound:
+-- collect → assess → decide → act.
+CREATE TABLE IF NOT EXISTS activities (
+    id           BIGSERIAL   PRIMARY KEY,
+    subject_kind TEXT        NOT NULL DEFAULT '',
+    subject_id   BIGINT      NOT NULL DEFAULT 0,
+    kind         TEXT        NOT NULL DEFAULT 'run',
+    status       TEXT        NOT NULL DEFAULT 'finished',
+    title        TEXT        NOT NULL DEFAULT '',
+    description  TEXT        NOT NULL DEFAULT '',
+    remediation  TEXT        NOT NULL DEFAULT '',
+    proof        TEXT        NOT NULL DEFAULT '',
+    facts        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    tags         TEXT[]      NOT NULL DEFAULT '{}',
+    origin       TEXT        NOT NULL DEFAULT '',
+    flow_id      TEXT        NOT NULL DEFAULT '',
+    flow_title   TEXT        NOT NULL DEFAULT '',
+    process_id   BIGINT      NOT NULL DEFAULT 0,
+    pid          TEXT        NOT NULL DEFAULT '',
+    context_id   TEXT        NOT NULL DEFAULT '',
+    error        TEXT        NOT NULL DEFAULT '',
+    ref          JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    data         JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    meta         JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    started_at   TIMESTAMPTZ,
+    finished_at  TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_activities_subject ON activities (subject_kind, subject_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activities_status ON activities (status);
+CREATE INDEX IF NOT EXISTS idx_activities_process ON activities (process_id);
+CREATE INDEX IF NOT EXISTS idx_activities_tags ON activities USING gin (tags);
+CREATE INDEX IF NOT EXISTS idx_activities_created_at ON activities (created_at DESC);

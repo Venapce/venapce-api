@@ -113,6 +113,7 @@ func (s *Server) createIssue(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	s.recordCreate(c, "issue", issue.ID)
 	return c.Status(fiber.StatusCreated).JSON(issue)
 }
 
@@ -155,6 +156,7 @@ func (s *Server) updateIssue(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	s.recordEdit(c, "issue", id, cur, issue)
 	return c.JSON(issue)
 }
 
@@ -167,5 +169,6 @@ func (s *Server) deleteIssue(c fiber.Ctx) error {
 	if err := s.q.DeleteIssue(c.Context(), id); err != nil {
 		return err
 	}
+	s.forgetSubject(c.Context(), "issue", id)
 	return c.SendStatus(fiber.StatusNoContent)
 }

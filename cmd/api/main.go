@@ -73,6 +73,10 @@ func main() {
 	// in the background so it never delays the listener; progress goes to the log.
 	srv.StartSupersetProvisioning()
 
+	// Complete flow runs in the background: poll FloMorphic for every in-flight
+	// activity and lift the outcome when a process ends.
+	srv.StartActivitySync()
+
 	app := srv.App()
 	log.Printf("venapce-api %s listening on :%s", version.Current(), cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {

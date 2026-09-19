@@ -17,6 +17,8 @@ profile** — the connections it needs are already venapce's.
 | `db.findings.update` | Update a `finding` by `id`. |
 | `db.issues.upsert` | Insert an issue, or update it in place when an `id` is supplied and already exists. |
 | `db.issues.update` | Update an existing issue by `id` (only the filled fields change). |
+| `db.activities.upsert` | Record an activity on a subject row (`subject_kind` + `subject_id`): a note, a conclusion, an outcome of the flow's own. |
+| `db.activities.update` | Write a run's outcome onto the activity venapce opened for it: `id = {{$.activity.id}}`, then `title`, `description`, `remediation`, `proof`, `facts`, `tags`, `data`. |
 
 The three tables form an **optional** pipeline — stage → findings → issues — and a
 flow writes to whichever level its rules decide, in any order. They share one
@@ -25,6 +27,40 @@ vocabulary so every row is self-describing: `source` (where the data came from),
 was made, any shape), `data` (the payload / evidence, any shape), `meta`
 (enrichment, any shape), `tags`, and typed `stage_id` / `finding_id` / `issue_id`
 links between the levels (0 = not linked).
+
+**Activities** are the history of a row — manual edits, promotions and, above
+all, **flow runs**. When an operator sends a row through a flow (venapce
+`POST /api/activities/run`), the run's context document is:
+
+```json
+{
+  "subject":  { "kind": "stage", "id": 21 },
+  "row":      { "...the row: title, tags, data, meta, ref..." },
+  "activity": { "id": 4, "flowId": "flow_…", "flowTitle": "…" },
+  "history":  [ { "id": 3, "kind": "run", "title": "…", "facts": [], "…": "earlier finished activities, newest first" } ],
+  "input":    "optional extra input given at launch",
+  "outcome":  {}
+}
+```
+
+The flow reads the row through `{{$.row.…}}` tokens (its author keeps the flow's
+expectations and the row's data model in step) and leaves its conclusion in
+`$.outcome` — e.g. a `js` node with key `outcome` — using these keys:
+
+| key | meaning |
+| --- | --- |
+| `title`, `description` | what the flow concluded, in words |
+| `remediation` | what to do about it |
+| `proof` | the evidence (text, or any JSON — kept compact) |
+| `facts` | `[{"k":"severity","v":"low"}, …]` or `{"severity":"low"}` — typed key/values the front identifies and renders |
+| `tags` | labels for the activity |
+| `data` | the output document to keep (default: the whole final context minus `row`/`history`) |
+| `meta` | any enrichment |
+
+When the process ends, venapce reads the context back and lifts `outcome` into
+the activity's columns. A flow can also write them directly with
+`db.activities.update` (`id = {{$.activity.id}}`) — a key the outcome does not
+set never overwrites what the flow already wrote.
 | `osquery.query` | Dispatch an osquery SQL to one enrolled node via osctrl and return the rows it reports (run → poll → collect). |
 
 Meta lookups: `osquery.meta.nodes`, `osquery.meta.environments` back the Node and

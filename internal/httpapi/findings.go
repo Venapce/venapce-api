@@ -129,6 +129,7 @@ func (s *Server) createFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	s.recordCreate(c, "finding", f.ID)
 	return c.Status(fiber.StatusCreated).JSON(f)
 }
 
@@ -174,6 +175,7 @@ func (s *Server) updateFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	s.recordEdit(c, "finding", id, cur, f)
 	return c.JSON(f)
 }
 
@@ -186,6 +188,7 @@ func (s *Server) deleteFinding(c fiber.Ctx) error {
 	if err := s.q.DeleteFinding(c.Context(), id); err != nil {
 		return err
 	}
+	s.forgetSubject(c.Context(), "finding", id)
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
@@ -235,5 +238,6 @@ func (s *Server) promoteFinding(c fiber.Ctx) error {
 	if f.StageID != 0 {
 		_, _ = s.q.PromoteStage(c.Context(), db.PromoteStageParams{ID: f.StageID, IssueID: issue.ID})
 	}
+	s.recordPromote(c, "finding", id, "issue", issue.ID)
 	return c.JSON(fiber.Map{"finding": promoted, "issue": issue})
 }

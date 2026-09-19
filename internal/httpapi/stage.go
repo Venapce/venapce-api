@@ -87,6 +87,7 @@ func (s *Server) createStage(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	s.recordCreate(c, "stage", item.ID)
 	return c.Status(fiber.StatusCreated).JSON(item)
 }
 
@@ -127,6 +128,7 @@ func (s *Server) updateStage(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	s.recordEdit(c, "stage", id, cur, item)
 	return c.JSON(item)
 }
 
@@ -139,6 +141,7 @@ func (s *Server) deleteStage(c fiber.Ctx) error {
 	if err := s.q.DeleteStage(c.Context(), id); err != nil {
 		return err
 	}
+	s.forgetSubject(c.Context(), "stage", id)
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
@@ -199,6 +202,7 @@ func (s *Server) promoteStage(c fiber.Ctx) error {
 		if err != nil {
 			return err
 		}
+		s.recordPromote(c, "stage", id, "finding", finding.ID)
 		return c.JSON(fiber.Map{"stage": promoted, "finding": finding})
 	}
 
@@ -223,6 +227,7 @@ func (s *Server) promoteStage(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	s.recordPromote(c, "stage", id, "issue", issue.ID)
 	return c.JSON(fiber.Map{"stage": promoted, "issue": issue})
 }
 
