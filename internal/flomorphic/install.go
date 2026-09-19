@@ -117,3 +117,17 @@ func (c *Client) ListPluginActions(ctx context.Context) ([]PluginAction, error) 
 	}
 	return out, nil
 }
+
+// ExportFlow reads a saved flow back as the portable workflow document (GET
+// /flow/id/:id/export) — plugin nodes carry only their action, never this
+// install's ids, so the document can be packaged and imported anywhere.
+func (c *Client) ExportFlow(ctx context.Context, id string) (json.RawMessage, error) {
+	data, err := c.do(ctx, http.MethodGet, "/flow/id/"+strings.TrimSpace(id)+"/export", nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || data[0] != '{' {
+		return nil, fmt.Errorf("invalid export document")
+	}
+	return data, nil
+}

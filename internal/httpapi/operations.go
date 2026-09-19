@@ -980,3 +980,190 @@ func (s *Server) operationDoc(ctx context.Context, id int64) (map[string]any, er
 		"bindings": bindingsOf(op),
 	}, nil
 }
+
+// ---- the export side: package flows built on the canvas ----
+
+// GET /api/flows/:id/export — a FloMorphic flow as its portable document.
+func (s *Server) exportFlow(c fiber.Ctx) error {
+	client := s.flo.Get()
+	if client == nil {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "FloMorphic API access is not configured (Settings → FloMorphic)")
+	}
+	doc, err := client.ExportFlow(c.Context(), c.Params("id"))
+	if err != nil {
+		var he *flomorphic.HTTPError
+		if errors.As(err, &he) && he.NotFound() {
+			return fiber.NewError(fiber.StatusNotFound, "flow not found on FloMorphic")
+		}
+		return fiber.NewError(fiber.StatusBadGateway, err.Error())
+	}
+	c.Set("Content-Type", "application/json; charset=utf-8")
+	return c.Send(doc)
+}
+
+type packBody struct {
+	operations.PackInput
+	// Install the package as an operation (bound to the source flows) rather
+	// than only returning it.
+	Install bool `json:"install"`
+	// "zip" answers the package as a zip archive instead of JSON.
+	Format string `json:"format"`
+}
+
+// pack exports the flows the author picked and builds the bundle; the
+// returned bindings are what an install binds (key → source flow).
+func (s *Server) pack(ctx context.Context, in operations.PackInput) (*operations.Bundle, map[string]binding, error) {
+	client := s.flo.Get()
+	if client == nil {
+		return nil, nil, fiber.NewError(fiber.StatusServiceUnavailable, "FloMorphic API access is not configured (Settings → FloMorphic)")
+	}
+	exports := map[string]json.RawMessage{}
+	flows := map[string]flomorphic.Flow{}
+	for _, f := range in.Flows {
+		id := strings.TrimSpace(f.FlowID)
+		if id == "" {
+			return nil, nil, fiber.NewError(fiber.StatusBadRequest, "every flow needs a flowId")
+		}
+		if _, done := exports[id]; done {
+			continue
+		}
+		doc, err := client.ExportFlow(ctx, id)
+		if err != nil {
+			return nil, nil, fiber.NewError(fiber.StatusBadGateway, fmt.Sprintf("export flow %s: %v", id, err))
+		}
+		exports[id] = doc
+		if fl, err := client.GetFlow(ctx, id); err == nil {
+			flows[id] = fl
+		}
+	}
+	b, keyOf, errs := operations.Pack(in, exports)
+	if len(errs) > 0 || b == nil {
+		return nil, nil, fiber.NewError(fiber.StatusUnprocessableEntity, strings.Join(errs, "; "))
+	}
+	if errs := b.Check(); len(errs) > 0 {
+		return nil, nil, fiber.NewError(fiber.StatusUnprocessableEntity, strings.Join(errs, "; "))
+	}
+	binds := map[string]binding{}
+	for id, key := range keyOf {
+		binds[key] = binding{FlowID: id, FlowTitle: flows[id].Title, InstalledAt: time.Now()}
+	}
+	return b, binds, nil
+}
+
+// POST /api/operations/pack — turn flows on the FloMorphic canvas into an
+// operation package: exported, wrapped in a manifest + README, and either
+// returned (JSON bundle or zip) or installed here, already bound to the flows
+// it came from.
+func (s *Server) packOperation(c fiber.Ctx) error {
+	var body packBody
+	if err := c.Bind().Body(&body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
+	}
+	b, binds, err := s.pack(c.Context(), body.PackInput)
+	if err != nil {
+		return err
+	}
+	m := b.Manifest
+	if body.Format == "zip" {
+		return sendZip(c, b)
+	}
+	if !body.Install {
+		return c.JSON(fiber.Map{"manifest": m.Raw, "files": b.Files})
+	}
+	if _, err := s.q.GetOperationByKey(c.Context(), m.ID); err == nil {
+		return fiber.NewError(fiber.StatusConflict, fmt.Sprintf("an operation with id %q is already installed — pick another id or remove it first", m.ID))
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	plain, secrets, err := s.storeParams(m, nil)
+	if err != nil {
+		return err
+	}
+	op, err := s.q.CreateOperation(c.Context(), db.CreateOperationParams{
+		Key: m.ID, Name: m.Name, Version: m.Version, Description: m.Description,
+		Tags: orEmpty(m.Tags), Scale: orEmpty(m.Scale), Manifest: m.Raw, Files: mustJSON(b.Files),
+		Source: mustJSON(operations.Source{Kind: "flomorphic"}), Params: plain, Secrets: secrets, Bindings: mustJSON(binds),
+	})
+	if err != nil {
+		return err
+	}
+	s.recordChange(c.Context(), subjectOperation, op.ID, actCreate, fmt.Sprintf("Packaged v%s from %d FloMorphic flow(s)", m.Version, len(binds)), "manual",
+		map[string]any{"bindings": binds})
+	return s.respondDetail(c, op)
+}
+
+func sendZip(c fiber.Ctx, b *operations.Bundle) error {
+	data, err := operations.Zip(b)
+	if err != nil {
+		return err
+	}
+	c.Set("Content-Type", "application/zip")
+	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%s.zip"`, b.Manifest.ID, b.Manifest.Version))
+	return c.Send(data)
+}
+
+// GET /api/operations/:id/package.zip — the installed package as a zip, for
+// a catalog repository or another install.
+func (s *Server) getOperationPackage(c fiber.Ctx) error {
+	op, err := s.getOp(c)
+	if err != nil {
+		return err
+	}
+	b, err := s.loadBundle(op)
+	if err != nil {
+		return err
+	}
+	return sendZip(c, b)
+}
+
+// POST /api/operations/:id/flows/:key/pull — replace the package's flow file
+// with the bound flow as it is on the canvas now (the author edited it there).
+// Param placeholders the original file carried are gone after a pull, since
+// the canvas holds substituted values; the response says so.
+func (s *Server) pullOperationFlow(c fiber.Ctx) error {
+	client := s.flo.Get()
+	if client == nil {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "FloMorphic API access is not configured (Settings → FloMorphic)")
+	}
+	op, err := s.getOp(c)
+	if err != nil {
+		return err
+	}
+	key := c.Params("key")
+	b, err := s.loadBundle(op)
+	if err != nil {
+		return err
+	}
+	f := b.Manifest.Flow(key)
+	if f == nil {
+		return fiber.NewError(fiber.StatusNotFound, "no such flow in the manifest")
+	}
+	bnd, ok := bindingsOf(op)[key]
+	if !ok || bnd.FlowID == "" {
+		return fiber.NewError(fiber.StatusConflict, "the flow is not bound to a FloMorphic flow")
+	}
+	doc, err := client.ExportFlow(c.Context(), bnd.FlowID)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadGateway, "export: "+err.Error())
+	}
+	text := string(doc)
+	if pretty, err := json.MarshalIndent(doc, "", "  "); err == nil {
+		text = string(pretty)
+	}
+	hadPlaceholders := strings.Contains(b.Files[f.File], "${param.")
+	b.Files[f.File] = text + "\n"
+	// The canvas is now the source of the file: the binding it came from stays.
+	updated, err := s.q.UpdateOperation(c.Context(), db.UpdateOperationParams{
+		ID: op.ID, Name: op.Name, Version: op.Version, Description: op.Description, Tags: op.Tags, Scale: op.Scale,
+		Manifest: op.Manifest, Files: mustJSON(b.Files), Source: op.Source, Params: op.Params, Secrets: op.Secrets, Bindings: op.Bindings,
+	})
+	if err != nil {
+		return err
+	}
+	note := fmt.Sprintf("Pulled flow %q from FloMorphic into the package", key)
+	if hadPlaceholders {
+		note += " — the file's ${param.…} placeholders were replaced by the canvas values"
+	}
+	s.recordChange(c.Context(), subjectOperation, op.ID, actEdit, note, "manual", map[string]any{"flowKey": key, "flowId": bnd.FlowID, "placeholdersLost": hadPlaceholders})
+	return s.respondDetail(c, updated)
+}

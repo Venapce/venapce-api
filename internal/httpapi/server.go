@@ -196,6 +196,12 @@ func (s *Server) App() *fiber.App {
 	api.Post("/operations/:id/flows/:key/install", s.installOperationFlow)
 	api.Put("/operations/:id/flows/:key", s.linkOperationFlow)
 	api.Post("/operations/:id/run", s.runOperation)
+	// The export side: package flows from the canvas, zip an installed package,
+	// pull canvas edits back into a package.
+	api.Get("/flows/:id/export", s.exportFlow)
+	api.Post("/operations/pack", s.packOperation) // {…PackInput, install?, format?: zip}
+	api.Get("/operations/:id/package.zip", s.getOperationPackage)
+	api.Post("/operations/:id/flows/:key/pull", s.pullOperationFlow)
 
 	return app
 }

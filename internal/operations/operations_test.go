@@ -131,3 +131,53 @@ func TestResolveURL(t *testing.T) {
 		t.Fatal("expected an error for garbage")
 	}
 }
+
+func TestPackFromExports(t *testing.T) {
+	b := loadExample(t)
+	export := json.RawMessage(b.Files["flows/http-audit.flow.json"])
+	in := PackInput{
+		Name: "Fleet HTTP audit (packed)", Description: "Who serves HTTP on the fleet.",
+		Tags: []string{"linux"}, Scale: []string{"fleet"},
+		Params: map[string]ParamSpec{"env": {Type: "string", Default: json.RawMessage(`"default"`), Required: true}},
+		Flows: []PackFlow{
+			{FlowID: "flow_a", Role: "entry", Schedule: "0 3 * * *", Writes: []string{"stage"}},
+			{FlowID: "flow_b", Key: "triage", Role: "on-row", Subject: []string{"stage"}, Title: "Triage a row"},
+		},
+	}
+	out, keyOf, errs := Pack(in, map[string]json.RawMessage{"flow_a": export, "flow_b": export})
+	if len(errs) > 0 {
+		t.Fatalf("pack: %v", errs)
+	}
+	m := out.Manifest
+	if m.ID != "fleet-http-audit-packed" || m.Version != "1.0.0" {
+		t.Fatalf("id/version derived wrong: %s %s", m.ID, m.Version)
+	}
+	if keyOf["flow_b"] != "triage" || keyOf["flow_a"] != "linux-fleet-http-nginx-served-hostnames-audit" {
+		t.Fatalf("keys: %v", keyOf)
+	}
+	if m.Flows[0].Step != 1 || m.Flows[1].Step != 2 || m.Flows[0].File != "flows/"+keyOf["flow_a"]+".flow.json" {
+		t.Fatalf("flows: %+v", m.Flows)
+	}
+	if m.Requires == nil || m.Requires.Osctrl == nil || len(m.Requires.Plugins) != 1 || m.Requires.Plugins[0].Name != "venapce" {
+		t.Fatalf("requires not derived from the export: %+v", m.Requires)
+	}
+	if strings.Join(m.Requires.Plugins[0].Actions, ",") != "db.stages.upsert,osquery.query,osquery.queryByTags" {
+		t.Fatalf("actions: %v", m.Requires.Plugins[0].Actions)
+	}
+	readme := out.Files["README.md"]
+	for _, want := range []string{"# Fleet HTTP audit (packed)", "## Mission", "### Step 1 —", "### Step 2 — Triage a row (`triage`, on a stage)", "**venapce** plugin", "- `env` —"} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README scaffold lacks %q:\n%s", want, readme)
+		}
+	}
+	if errs := out.Check(); len(errs) > 0 {
+		t.Fatalf("packed bundle does not pass Check: %v", errs)
+	}
+	z, err := Zip(out)
+	if err != nil || len(z) < 100 {
+		t.Fatalf("zip: %v (%d bytes)", err, len(z))
+	}
+	if _, ok := out.Files[ManifestFile]; ok {
+		t.Fatal("manifest must not be stored in files")
+	}
+}
