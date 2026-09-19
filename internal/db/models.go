@@ -97,6 +97,24 @@ type Issue struct {
 	UpdatedAt time.Time       `json:"updatedAt"`
 }
 
+type Operation struct {
+	ID          int64           `json:"id"`
+	Key         string          `json:"key"`
+	Name        string          `json:"name"`
+	Version     string          `json:"version"`
+	Description string          `json:"description"`
+	Tags        []string        `json:"tags"`
+	Scale       []string        `json:"scale"`
+	Manifest    json.RawMessage `json:"manifest"`
+	Files       json.RawMessage `json:"files"`
+	Source      json.RawMessage `json:"source"`
+	Params      json.RawMessage `json:"params"`
+	Secrets     json.RawMessage `json:"secrets"`
+	Bindings    json.RawMessage `json:"bindings"`
+	InstalledAt time.Time       `json:"installedAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
 type Setting struct {
 	Key       string          `json:"key"`
 	Value     json.RawMessage `json:"value"`

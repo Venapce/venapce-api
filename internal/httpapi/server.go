@@ -183,6 +183,20 @@ func (s *Server) App() *fiber.App {
 	api.Post("/activities/:id/sync", s.syncActivityNow)
 	api.Post("/activities/:id/stop", s.stopActivity)
 
+	// Operations: installed packages of flows that originate pipeline data.
+	// A package is stored whole; its flows are pushed into FloMorphic from here
+	// (params substituted) and its entry flows run as activities on it.
+	api.Get("/operations", s.listOperations)
+	api.Post("/operations/import", s.importOperation) // {url|bundle, source, params, dryRun}
+	api.Get("/operations/:id", s.getOperation)
+	api.Delete("/operations/:id", s.deleteOperation)
+	api.Post("/operations/:id/update", s.updateOperation)
+	api.Put("/operations/:id/params", s.putOperationParams)
+	api.Get("/operations/:id/flows/:key/file", s.getOperationFlowFile)
+	api.Post("/operations/:id/flows/:key/install", s.installOperationFlow)
+	api.Put("/operations/:id/flows/:key", s.linkOperationFlow)
+	api.Post("/operations/:id/run", s.runOperation)
+
 	return app
 }
 

@@ -50,8 +50,10 @@ const (
 	actRunning  = flomorphic.ProcessRunning
 )
 
-// subjectKinds are the tables an activity can be about.
-var subjectKinds = map[string]bool{"stage": true, "finding": true, "issue": true}
+// subjectKinds are the tables an activity can be about. `operation` is the
+// subject of an originating run — an operation's entry flow started from the
+// Operations page, with no pipeline row behind it.
+var subjectKinds = map[string]bool{"stage": true, "finding": true, "issue": true, subjectOperation: true}
 
 // fact is one typed key/value of an outcome: [{"k":"severity","v":"low"}].
 // `v` is any JSON value — a string usually, but a number, list or object is
@@ -374,7 +376,7 @@ func (s *Server) runFlow(c fiber.Ctx) error {
 	}
 	for _, sub := range subjects {
 		if !subjectKinds[sub.Kind] || sub.ID == 0 {
-			return fiber.NewError(fiber.StatusBadRequest, "subject kind must be stage|finding|issue with a non-zero id")
+			return fiber.NewError(fiber.StatusBadRequest, "subject kind must be stage|finding|issue|operation with a non-zero id")
 		}
 	}
 	if len(body.Input) > 0 && !json.Valid(body.Input) {
@@ -762,6 +764,8 @@ func (s *Server) loadSubject(ctx context.Context, kind string, id int64) (map[st
 		rec, err = s.q.GetFinding(ctx, id)
 	case "issue":
 		rec, err = s.q.GetIssue(ctx, id)
+	case subjectOperation:
+		return s.operationDoc(ctx, id)
 	default:
 		return nil, fmt.Errorf("unknown subject kind %q", kind)
 	}

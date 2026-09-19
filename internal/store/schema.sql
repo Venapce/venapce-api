@@ -203,3 +203,44 @@ CREATE INDEX IF NOT EXISTS idx_activities_status ON activities (status);
 CREATE INDEX IF NOT EXISTS idx_activities_process ON activities (process_id);
 CREATE INDEX IF NOT EXISTS idx_activities_tags ON activities USING gin (tags);
 CREATE INDEX IF NOT EXISTS idx_activities_created_at ON activities (created_at DESC);
+
+-- ---- Operations: installed packages of flows that originate pipeline data ----
+--
+-- An operation is the "feature" unit of Venapce: a folder holding one or more
+-- FloMorphic workflow exports plus an `operation.json` manifest (schema in the
+-- wapp: public/schemas/venapce-operation.schema.json) that says what the estate
+-- must provide (osctrl, plugins, settings profiles, other operations) and which
+-- `params` adapt it to one organization. The whole package is kept here — the
+-- manifest and every file it names, as text — so a flow can be (re)installed
+-- into FloMorphic at any time with the operator's params substituted, and the
+-- package can be re-read from its source for an upgrade.
+--
+--   key        manifest.id — one install per key
+--   manifest   the parsed operation.json
+--   files      {path: text} — the flow exports, README, per-flow docs
+--   source     where it came from ({kind:url|folder|paste, url, path, ref, folder})
+--   params     operator values of the manifest params (secret ones excluded)
+--   secrets    {name: ciphertext} — secret params, AES-GCM, never returned
+--   bindings   {flowKey: {flowId, flowTitle, installedAt}} — which FloMorphic
+--              flow each manifest flow became
+--
+-- Runs of an operation's entry flows are activities with subject_kind
+-- 'operation' and subject_id = operations.id.
+CREATE TABLE IF NOT EXISTS operations (
+    id           BIGSERIAL   PRIMARY KEY,
+    key          TEXT        NOT NULL UNIQUE,
+    name         TEXT        NOT NULL DEFAULT '',
+    version      TEXT        NOT NULL DEFAULT '',
+    description  TEXT        NOT NULL DEFAULT '',
+    tags         TEXT[]      NOT NULL DEFAULT '{}',
+    scale        TEXT[]      NOT NULL DEFAULT '{}',
+    manifest     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    files        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    source       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    params       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    secrets      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    bindings     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    installed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_operations_tags ON operations USING gin (tags);
