@@ -9,6 +9,7 @@ package flow
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"reflect"
 	"regexp"
 	"strings"
@@ -52,9 +53,14 @@ func (r *Resolver) Resolve(text string) string {
 
 // fetch reads a JSON path from the flow context. The reply is JSON: a JSON string
 // is unwrapped to its value; anything else is returned raw so it can be inlined.
+// The path is forwarded as-is — runtime aliases such as $this are the runtime's
+// to interpret, not ours. A reply we cannot use is logged, since the token is
+// then passed through verbatim and that is what the action will act on.
 func (r *Resolver) fetch(jsonPath string) string {
-	raw, ok := r.job.CmdGetScope(jsonPath).([]byte)
+	reply := r.job.CmdGetScope(jsonPath)
+	raw, ok := reply.([]byte)
 	if !ok || len(raw) == 0 {
+		log.Printf("flow: scope %s unresolved for job %s (runtime replied %T: %v); token left verbatim", jsonPath, r.job.JobId, reply, reply)
 		return fmt.Sprintf("{{%s}}", jsonPath) // leave the token in place
 	}
 	var s string

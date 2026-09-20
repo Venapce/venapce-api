@@ -54,6 +54,9 @@ type DistributedQuery struct {
 	Active     bool   `json:"active"`
 	Completed  bool   `json:"completed"`
 	Expired    bool   `json:"expired"`
+	// Raw is osctrl's whole record as it came off the wire (creator, target,
+	// timestamps, expiration…), for callers that echo it verbatim.
+	Raw json.RawMessage `json:"-"`
 }
 
 // Done reports whether osctrl considers this distributed query finished: it has
@@ -115,6 +118,7 @@ func (c *Client) QueryStatus(ctx context.Context, env, name string) (*Distribute
 	if err := json.Unmarshal(raw, &q); err != nil {
 		return nil, fmt.Errorf("osctrl query status: unreadable response: %w", err)
 	}
+	q.Raw = raw
 	return &q, nil
 }
 

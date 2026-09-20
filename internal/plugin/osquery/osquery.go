@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -260,12 +261,17 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 	decodeRowData(rows)
 	rows, failures := splitFailures(rows)
 
+	// rows are per-node envelopes; the osquery rows themselves sit in each
+	// envelope's data.result, so count those too — a node that ran the SQL
+	// and matched nothing still contributes one envelope with an empty result.
+	matched := resultRowCount(rows)
 	out := map[string]any{
-		"queryName": name,
-		"env":       env,
-		"rows":      rows,
-		"rowCount":  len(rows),
-		"columns":   columnsOf(rows),
+		"queryName":  name,
+		"env":        env,
+		"rows":       rows,
+		"rowCount":   len(rows),
+		"resultRows": matched,
+		"columns":    columnsOf(rows),
 	}
 	if total > len(rows)+len(failures) {
 		out["totalRows"] = total
@@ -283,6 +289,12 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 		out["completed"] = status.Done()
 		out["expected"] = status.Expected
 		out["executions"] = status.Executions
+		// osctrl's own record of the query, verbatim, so the context shows
+		// exactly what the osctrl panel shows for it.
+		var record any
+		if json.Unmarshal(status.Raw, &record) == nil && record != nil {
+			out["osctrlQuery"] = record
+		}
 	}
 	out["errors"] = failed
 	if len(failures) > 0 {
@@ -293,7 +305,7 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 	// column) so a flow or assistant reading the context sees why, instead of
 	// a green run whose only symptom is a non-zero `errors` count.
 	if succeeded == 0 && failed > 0 {
-		job.DoneWithErrorData(failureSummary(failed, failures), out)
+		finish(job, name, func() any { return job.DoneWithErrorData(failureSummary(failed, failures), out) })
 		return
 	}
 	switch {
@@ -303,8 +315,28 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 		out["note"] = fmt.Sprintf("%d node(s) failed to run the query; see failures", failed)
 	case status != nil && !status.Done():
 		out["note"] = "not all targeted nodes had reported before the timeout; rows are what arrived so far"
+	case succeeded > 0 && matched == 0:
+		out["note"] = fmt.Sprintf("the query ran on %d node(s) and matched no rows", succeeded)
 	}
-	job.Done(out)
+	finish(job, name, func() any { return job.Done(out) })
+}
+
+// finish sends the job's final command and refuses to let a failed send pass
+// silently: the SDK returns the transport error instead of raising it, and a
+// job whose Done never reached the runtime leaves the node with an empty
+// context and no hint why. On failure it logs and retries once, then ends the
+// job with an error carrying the reason so the flow at least sees that.
+func finish(job *sdkv1.Job, name string, send func() any) {
+	err, failed := send().(error)
+	if !failed {
+		return
+	}
+	log.Printf("osquery: job %s (%s): final command not delivered: %v — retrying", job.JobId, name, err)
+	if err, failed = send().(error); !failed {
+		return
+	}
+	log.Printf("osquery: job %s (%s): final command failed again: %v", job.JobId, name, err)
+	job.DoneWithError("query " + name + " ran, but its result could not be delivered to the flow runtime: " + err.Error())
 }
 
 // splitFailures separates the result rows that are really execution errors from
@@ -331,6 +363,21 @@ func splitFailures(rows []map[string]any) (ok []map[string]any, failures []map[s
 		ok = []map[string]any{}
 	}
 	return ok, failures
+}
+
+// resultRowCount sums the osquery rows inside the envelopes' decoded
+// data.result arrays. Envelopes whose data is not decoded (or has no result
+// array) add nothing.
+func resultRowCount(rows []map[string]any) int {
+	n := 0
+	for _, row := range rows {
+		if data, ok := row["data"].(map[string]any); ok {
+			if result, ok := data["result"].([]any); ok {
+				n += len(result)
+			}
+		}
+	}
+	return n
 }
 
 // rowStatus reads a result row's osquery exit status: the top-level `status`

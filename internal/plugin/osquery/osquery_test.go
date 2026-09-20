@@ -231,3 +231,23 @@ func TestSplitFailuresKeepsRowsNonNil(t *testing.T) {
 		t.Errorf("unexpected failures %v", failures)
 	}
 }
+
+// A node that ran the SQL and matched nothing still yields one envelope with an
+// empty result, so the osquery row count must come from inside the envelopes.
+func TestResultRowCountLooksInsideEnvelopes(t *testing.T) {
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(`[
+		{"uuid":"A","status":0,"data":"{\"result\":[],\"status\":0}"},
+		{"uuid":"B","status":0,"data":"{\"result\":[{\"pid\":\"1\"},{\"pid\":\"2\"}],\"status\":0}"},
+		{"uuid":"C","status":0,"data":"not json"}
+	]`), &rows); err != nil {
+		t.Fatal(err)
+	}
+	decodeRowData(rows)
+	if n := resultRowCount(rows); n != 2 {
+		t.Errorf("want 2 osquery rows across envelopes, got %d", n)
+	}
+	if n := resultRowCount(rows[:1]); n != 0 {
+		t.Errorf("empty result must count 0, got %d", n)
+	}
+}
