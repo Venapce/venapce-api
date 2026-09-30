@@ -1,9 +1,9 @@
 module github.com/Venapce/venapce-api
 
-go 1.26.2
+go 1.27
 
 require (
-	github.com/Inflowenger/go-plugin-sdk v0.2.2
+	github.com/Inflowenger/go-plugin-sdk v0.2.4
 	github.com/gofiber/fiber/v3 v3.5.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0

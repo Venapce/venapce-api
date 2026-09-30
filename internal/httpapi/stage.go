@@ -10,9 +10,11 @@ import (
 	"github.com/Venapce/venapce-api/internal/db"
 )
 
-// GET /api/stage?disposition=&source=&search=
+// GET /api/stage?tags=&match=&disposition=&source=&search=
 func (s *Server) listStage(c fiber.Ctx) error {
 	items, err := s.q.ListStage(c.Context(), db.ListStageParams{
+		Tags:        splitTags(c.Query("tags")),
+		MatchAll:    c.Query("match") == "all",
 		Disposition: c.Query("disposition"),
 		Source:      c.Query("source"),
 		Search:      c.Query("search"),
@@ -21,6 +23,15 @@ func (s *Server) listStage(c fiber.Ctx) error {
 		return err
 	}
 	return c.JSON(items)
+}
+
+// GET /api/stage/tags — distinct tags for the view-builder tag picker.
+func (s *Server) stageTags(c fiber.Ctx) error {
+	tags, err := s.q.StageTags(c.Context())
+	if err != nil {
+		return err
+	}
+	return c.JSON(orEmpty(tags))
 }
 
 // GET /api/stage/:id — one staged row plus what it turned into, so the detail

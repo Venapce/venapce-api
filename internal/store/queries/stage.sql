@@ -1,6 +1,12 @@
 -- name: ListStage :many
+-- Filter by tags (empty = no tag filter). match_all=false matches ANY of the
+-- tags (overlap, &&); match_all=true requires ALL of them (contains, @>) — the
+-- same semantics as ListIssues / ListFindings.
 SELECT * FROM stage
-WHERE (@disposition::text = '' OR disposition = @disposition::text)
+WHERE (cardinality(@tags::text[]) = 0
+       OR (@match_all::bool AND tags @> @tags::text[])
+       OR (NOT @match_all::bool AND tags && @tags::text[]))
+  AND (@disposition::text = '' OR disposition = @disposition::text)
   AND (@source::text = '' OR source = @source::text)
   AND (@search::text = ''
        OR title ILIKE '%' || @search::text || '%'
@@ -8,6 +14,10 @@ WHERE (@disposition::text = '' OR disposition = @disposition::text)
        OR source ILIKE '%' || @search::text || '%'
        OR origin ILIKE '%' || @search::text || '%')
 ORDER BY received_at DESC;
+
+-- name: StageTags :many
+-- Distinct tags across the inbox, for the tag picker when defining a view.
+SELECT DISTINCT unnest(tags)::text AS tag FROM stage ORDER BY tag;
 
 -- name: GetStage :one
 SELECT * FROM stage WHERE id = $1;

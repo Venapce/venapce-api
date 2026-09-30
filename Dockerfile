@@ -1,5 +1,5 @@
 # Multi-stage build for the venapce-api binary.
-FROM golang:1.26 AS build
+FROM golang:1.27 AS build
 # The release tag, stamped into the binary (startup log + /api/version).
 ARG VERSION=dev
 WORKDIR /src

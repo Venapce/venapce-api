@@ -137,3 +137,13 @@ type Stage struct {
 	ReceivedAt  time.Time       `json:"receivedAt"`
 	UpdatedAt   time.Time       `json:"updatedAt"`
 }
+
+type View struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Target    string    `json:"target"`
+	Tags      []string  `json:"tags"`
+	MatchMode string    `json:"matchMode"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}

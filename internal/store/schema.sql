@@ -143,6 +143,8 @@ ALTER TABLE issues ADD COLUMN IF NOT EXISTS meta       JSONB  NOT NULL DEFAULT '
 CREATE INDEX IF NOT EXISTS idx_issues_tags ON issues USING gin (tags);
 CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stage_disposition ON stage (disposition);
+-- Stage is tag-filtered too now (saved views), so it wants the same GIN index.
+CREATE INDEX IF NOT EXISTS idx_stage_tags ON stage USING gin (tags);
 CREATE INDEX IF NOT EXISTS idx_findings_tags ON findings USING gin (tags);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings (status);
 CREATE INDEX IF NOT EXISTS idx_findings_fingerprint ON findings (fingerprint);
@@ -244,3 +246,22 @@ CREATE TABLE IF NOT EXISTS operations (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_operations_tags ON operations USING gin (tags);
+
+-- ---- Saved views: a named tag filter over one of the pipeline tables ----
+--
+-- How an operator "adds a submenu" without a new table: name a set of tags and
+-- which table they filter (stage | findings | issues | activities), and the
+-- sidebar gains an entry that opens that table carved down to those rows.
+-- `match_mode` says whether a row needs ANY of the tags ('any', overlap) or ALL
+-- of them ('all', contains) — the same semantics the list endpoints take.
+-- Stored server-side so a view follows the operator across browsers.
+CREATE TABLE IF NOT EXISTS views (
+    id          BIGSERIAL   PRIMARY KEY,
+    name        TEXT        NOT NULL,
+    target      TEXT        NOT NULL DEFAULT 'issues',
+    tags        TEXT[]      NOT NULL DEFAULT '{}',
+    match_mode  TEXT        NOT NULL DEFAULT 'any',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_views_target ON views (target);

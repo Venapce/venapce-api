@@ -97,24 +97,38 @@ func (q *Queries) GetStage(ctx context.Context, id int64) (Stage, error) {
 
 const listStage = `-- name: ListStage :many
 SELECT id, title, summary, source, origin, disposition, finding_id, issue_id, tags, ref, data, meta, received_at, updated_at FROM stage
-WHERE ($1::text = '' OR disposition = $1::text)
-  AND ($2::text = '' OR source = $2::text)
-  AND ($3::text = ''
-       OR title ILIKE '%' || $3::text || '%'
-       OR summary ILIKE '%' || $3::text || '%'
-       OR source ILIKE '%' || $3::text || '%'
-       OR origin ILIKE '%' || $3::text || '%')
+WHERE (cardinality($1::text[]) = 0
+       OR ($2::bool AND tags @> $1::text[])
+       OR (NOT $2::bool AND tags && $1::text[]))
+  AND ($3::text = '' OR disposition = $3::text)
+  AND ($4::text = '' OR source = $4::text)
+  AND ($5::text = ''
+       OR title ILIKE '%' || $5::text || '%'
+       OR summary ILIKE '%' || $5::text || '%'
+       OR source ILIKE '%' || $5::text || '%'
+       OR origin ILIKE '%' || $5::text || '%')
 ORDER BY received_at DESC
 `
 
 type ListStageParams struct {
-	Disposition string `json:"disposition"`
-	Source      string `json:"source"`
-	Search      string `json:"search"`
+	Tags        []string `json:"tags"`
+	MatchAll    bool     `json:"matchAll"`
+	Disposition string   `json:"disposition"`
+	Source      string   `json:"source"`
+	Search      string   `json:"search"`
 }
 
+// Filter by tags (empty = no tag filter). match_all=false matches ANY of the
+// tags (overlap, &&); match_all=true requires ALL of them (contains, @>) — the
+// same semantics as ListIssues / ListFindings.
 func (q *Queries) ListStage(ctx context.Context, arg ListStageParams) ([]Stage, error) {
-	rows, err := q.db.Query(ctx, listStage, arg.Disposition, arg.Source, arg.Search)
+	rows, err := q.db.Query(ctx, listStage,
+		arg.Tags,
+		arg.MatchAll,
+		arg.Disposition,
+		arg.Source,
+		arg.Search,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +200,31 @@ func (q *Queries) PromoteStage(ctx context.Context, arg PromoteStageParams) (Sta
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const stageTags = `-- name: StageTags :many
+SELECT DISTINCT unnest(tags)::text AS tag FROM stage ORDER BY tag
+`
+
+// Distinct tags across the inbox, for the tag picker when defining a view.
+func (q *Queries) StageTags(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, stageTags)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, err
+		}
+		items = append(items, tag)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateStage = `-- name: UpdateStage :one

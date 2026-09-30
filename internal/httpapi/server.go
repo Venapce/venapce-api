@@ -149,6 +149,7 @@ func (s *Server) App() *fiber.App {
 	// Stage → Findings → Issues pipeline (rows produced/advanced by FloMorphic;
 	// every level is optional — a flow may write to any of the three directly).
 	api.Get("/stage", s.listStage)
+	api.Get("/stage/tags", s.stageTags)
 	api.Post("/stage", s.createStage)
 	api.Get("/stage/:id", s.getStage)
 	api.Put("/stage/:id", s.updateStage)
@@ -182,6 +183,14 @@ func (s *Server) App() *fiber.App {
 	api.Delete("/activities/:id", s.deleteActivity)
 	api.Post("/activities/:id/sync", s.syncActivityNow)
 	api.Post("/activities/:id/stop", s.stopActivity)
+
+	// Saved views: named tag filters over one of the tables above, kept here so
+	// a view follows the operator across browsers.
+	api.Get("/views", s.listViews) // ?table=stage|findings|issues|activities
+	api.Post("/views", s.createView)
+	api.Get("/views/:id", s.getView)
+	api.Put("/views/:id", s.updateView)
+	api.Delete("/views/:id", s.deleteView)
 
 	// Operations: installed packages of flows that originate pipeline data.
 	// A package is stored whole; its flows are pushed into FloMorphic from here
