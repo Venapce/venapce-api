@@ -37,10 +37,10 @@ func (q *Queries) ActivityTags(ctx context.Context) ([]string, error) {
 
 const createActivity = `-- name: CreateActivity :one
 INSERT INTO activities (subject_kind, subject_id, kind, status, title, description, remediation, proof,
-                        facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error,
+                        facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, errors,
                         ref, data, meta, started_at, finished_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-RETURNING id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, ref, data, meta, started_at, finished_at, created_at, updated_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+RETURNING id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, errors, ref, data, meta, started_at, finished_at, created_at, updated_at
 `
 
 type CreateActivityParams struct {
@@ -61,6 +61,7 @@ type CreateActivityParams struct {
 	Pid         string          `json:"pid"`
 	ContextID   string          `json:"contextId"`
 	Error       string          `json:"error"`
+	Errors      json.RawMessage `json:"errors"`
 	Ref         json.RawMessage `json:"ref"`
 	Data        json.RawMessage `json:"data"`
 	Meta        json.RawMessage `json:"meta"`
@@ -87,6 +88,7 @@ func (q *Queries) CreateActivity(ctx context.Context, arg CreateActivityParams) 
 		arg.Pid,
 		arg.ContextID,
 		arg.Error,
+		arg.Errors,
 		arg.Ref,
 		arg.Data,
 		arg.Meta,
@@ -113,6 +115,7 @@ func (q *Queries) CreateActivity(ctx context.Context, arg CreateActivityParams) 
 		&i.Pid,
 		&i.ContextID,
 		&i.Error,
+		&i.Errors,
 		&i.Ref,
 		&i.Data,
 		&i.Meta,
@@ -148,7 +151,7 @@ func (q *Queries) DeleteActivity(ctx context.Context, id int64) error {
 }
 
 const getActivity = `-- name: GetActivity :one
-SELECT id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, ref, data, meta, started_at, finished_at, created_at, updated_at FROM activities WHERE id = $1
+SELECT id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, errors, ref, data, meta, started_at, finished_at, created_at, updated_at FROM activities WHERE id = $1
 `
 
 func (q *Queries) GetActivity(ctx context.Context, id int64) (Activity, error) {
@@ -173,6 +176,7 @@ func (q *Queries) GetActivity(ctx context.Context, id int64) (Activity, error) {
 		&i.Pid,
 		&i.ContextID,
 		&i.Error,
+		&i.Errors,
 		&i.Ref,
 		&i.Data,
 		&i.Meta,
@@ -185,7 +189,7 @@ func (q *Queries) GetActivity(ctx context.Context, id int64) (Activity, error) {
 }
 
 const listActivities = `-- name: ListActivities :many
-SELECT id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, ref, data, meta, started_at, finished_at, created_at, updated_at FROM activities
+SELECT id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, errors, ref, data, meta, started_at, finished_at, created_at, updated_at FROM activities
 WHERE ($1::text = '' OR subject_kind = $1::text)
   AND ($2::bigint = 0 OR subject_id = $2::bigint)
   AND ($3::text = '' OR kind = $3::text)
@@ -255,6 +259,7 @@ func (q *Queries) ListActivities(ctx context.Context, arg ListActivitiesParams) 
 			&i.Pid,
 			&i.ContextID,
 			&i.Error,
+			&i.Errors,
 			&i.Ref,
 			&i.Data,
 			&i.Meta,
@@ -274,7 +279,7 @@ func (q *Queries) ListActivities(ctx context.Context, arg ListActivitiesParams) 
 }
 
 const listActivitiesBySubject = `-- name: ListActivitiesBySubject :many
-SELECT id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, ref, data, meta, started_at, finished_at, created_at, updated_at FROM activities
+SELECT id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, errors, ref, data, meta, started_at, finished_at, created_at, updated_at FROM activities
 WHERE subject_kind = $1 AND subject_id = $2
 ORDER BY created_at DESC
 `
@@ -312,6 +317,7 @@ func (q *Queries) ListActivitiesBySubject(ctx context.Context, arg ListActivitie
 			&i.Pid,
 			&i.ContextID,
 			&i.Error,
+			&i.Errors,
 			&i.Ref,
 			&i.Data,
 			&i.Meta,
@@ -331,7 +337,7 @@ func (q *Queries) ListActivitiesBySubject(ctx context.Context, arg ListActivitie
 }
 
 const listOpenActivities = `-- name: ListOpenActivities :many
-SELECT id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, ref, data, meta, started_at, finished_at, created_at, updated_at FROM activities
+SELECT id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, errors, ref, data, meta, started_at, finished_at, created_at, updated_at FROM activities
 WHERE process_id <> 0 AND status IN ('scheduled', 'running', 'waiting')
 ORDER BY created_at ASC
 LIMIT $1
@@ -366,6 +372,7 @@ func (q *Queries) ListOpenActivities(ctx context.Context, limit int32) ([]Activi
 			&i.Pid,
 			&i.ContextID,
 			&i.Error,
+			&i.Errors,
 			&i.Ref,
 			&i.Data,
 			&i.Meta,
@@ -389,10 +396,10 @@ UPDATE activities
    SET subject_kind = $2, subject_id = $3, kind = $4, status = $5, title = $6, description = $7,
        remediation = $8, proof = $9, facts = $10, tags = $11, origin = $12, flow_id = $13,
        flow_title = $14, process_id = $15, pid = $16, context_id = $17, error = $18,
-       ref = $19, data = $20, meta = $21, started_at = $22, finished_at = $23,
+       errors = $19, ref = $20, data = $21, meta = $22, started_at = $23, finished_at = $24,
        updated_at = now()
  WHERE id = $1
-RETURNING id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, ref, data, meta, started_at, finished_at, created_at, updated_at
+RETURNING id, subject_kind, subject_id, kind, status, title, description, remediation, proof, facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, errors, ref, data, meta, started_at, finished_at, created_at, updated_at
 `
 
 type UpdateActivityParams struct {
@@ -414,6 +421,7 @@ type UpdateActivityParams struct {
 	Pid         string          `json:"pid"`
 	ContextID   string          `json:"contextId"`
 	Error       string          `json:"error"`
+	Errors      json.RawMessage `json:"errors"`
 	Ref         json.RawMessage `json:"ref"`
 	Data        json.RawMessage `json:"data"`
 	Meta        json.RawMessage `json:"meta"`
@@ -441,6 +449,7 @@ func (q *Queries) UpdateActivity(ctx context.Context, arg UpdateActivityParams) 
 		arg.Pid,
 		arg.ContextID,
 		arg.Error,
+		arg.Errors,
 		arg.Ref,
 		arg.Data,
 		arg.Meta,
@@ -467,6 +476,7 @@ func (q *Queries) UpdateActivity(ctx context.Context, arg UpdateActivityParams) 
 		&i.Pid,
 		&i.ContextID,
 		&i.Error,
+		&i.Errors,
 		&i.Ref,
 		&i.Data,
 		&i.Meta,

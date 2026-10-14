@@ -162,17 +162,20 @@ func ProcessOpen(status string) bool {
 // Process is one run of a flow, as FloMorphic records it. IndexID is the run's
 // integer identity (the process id venapce stores); PID is the engine's uuid.
 type Process struct {
-	IndexID    int64          `json:"indexId"`
-	PID        string         `json:"pid"`
-	FlowID     string         `json:"flowId"`
-	ContextID  string         `json:"contextId"`
-	Status     string         `json:"status"`
-	Error      string         `json:"error"`
-	Meta       map[string]any `json:"meta"`
-	Snapshot   map[string]any `json:"snapshot"`
-	StartedAt  int64          `json:"startedAt"`
-	FinishedAt int64          `json:"finishedAt"`
-	DurationMs int64          `json:"durationMs"`
+	IndexID   int64          `json:"indexId"`
+	PID       string         `json:"pid"`
+	FlowID    string         `json:"flowId"`
+	ContextID string         `json:"contextId"`
+	Status    string         `json:"status"`
+	Error     string         `json:"error"`
+	Meta      map[string]any `json:"meta"`
+	Snapshot  map[string]any `json:"snapshot"`
+	// Errors is the ledger of everything that went wrong during this run — see
+	// Ledger, below. Absent for a run that hit nothing.
+	Errors     *RunErrors `json:"errors,omitempty"`
+	StartedAt  int64      `json:"startedAt"`
+	FinishedAt int64      `json:"finishedAt"`
+	DurationMs int64      `json:"durationMs"`
 }
 
 // StartProcess launches flowID on the context document contextID and returns
@@ -216,4 +219,156 @@ func (c *Client) StopProcess(ctx context.Context, indexID int64) (*Process, erro
 		return nil, fmt.Errorf("invalid process: %w", err)
 	}
 	return &p, nil
+}
+
+// ---- the run's error ledger ----
+
+// A node error does not stop a flow: fractal records it, writes it into the
+// run's context header under `_errors`, and carries on. FloMorphic lifts that
+// header onto the process row (per pid, since overlapping runs of one context
+// document would clobber each other). So a run can report `finished` and still
+// have hit a dozen things, and this ledger is the only place a caller that was
+// not watching the event stream can read that from — without it a run that
+// failed at five nodes and still completed is indistinguishable from a clean
+// one. Venapce keeps it on the activity so every view of a run can say so.
+
+// Error kinds, as fractal stamps them (models.ErrorKind).
+const (
+	// ErrorKindNode is the flow's own: its node data, its js or rego, or
+	// something its node called that did not deliver. The flow author can act
+	// on it.
+	ErrorKindNode = "node"
+	// ErrorKindSystem is the platform's: infra that would not answer, a reply
+	// that would not marshal. Nothing in the flow caused it and nothing in the
+	// flow mends it.
+	ErrorKindSystem = "system"
+)
+
+// NodeError is one entry of the ledger (fractal-core models.NodeError).
+type NodeError struct {
+	Ts   int64  `json:"ts"`
+	Kind string `json:"kind"`
+	// Flow the error was raised in — a run that went through a GoTo has entries
+	// from more than one.
+	Flow string `json:"flow"`
+	Node string `json:"node"`
+	// Src is the actor that raised it — rt / js / rego / plugin:<title>.
+	Src string `json:"src"`
+	// Code is the engine status code (fractal StatusFractal).
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	// Loc is the JSON path the failure happened on, set only for a node running
+	// over a fan-out where the node id alone does not place it.
+	Loc string `json:"loc,omitempty"`
+}
+
+// RunErrors is one run's ledger. Count is the true total and Items may be
+// shorter: the header rides inside the context document, which has a publish
+// limit, so a cascading run's entries are capped at the earliest — which is
+// where the cause of a cascade is.
+type RunErrors struct {
+	Pid   string      `json:"pid"`
+	Count int         `json:"count"`
+	Items []NodeError `json:"items"`
+}
+
+// KindCounts splits the carried items by kind. Counted over Items rather than
+// Count, because the cap drops the tail and only a split derived from what is
+// in hand adds up to what is shown.
+func (e RunErrors) KindCounts() (node, system int) {
+	for _, it := range e.Items {
+		if it.Kind == ErrorKindSystem {
+			system++
+			continue
+		}
+		node++
+	}
+	return node, system
+}
+
+// Summary is the one-line form a caller shows next to the run's status —
+// "3 errors recorded during this run · 2 node, 1 system".
+func (e RunErrors) Summary() string {
+	node, system := e.KindCounts()
+	head := fmt.Sprintf("%d error%s recorded during this run", e.Count, plural(e.Count))
+	parts := []string{}
+	if node > 0 {
+		parts = append(parts, fmt.Sprintf("%d node", node))
+	}
+	if system > 0 {
+		parts = append(parts, fmt.Sprintf("%d system", system))
+	}
+	if len(parts) == 0 {
+		return head
+	}
+	return head + " · " + strings.Join(parts, ", ")
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// Ledger is the run's errors, or nil when there is nothing to report.
+func (p *Process) Ledger() *RunErrors {
+	if p == nil {
+		return nil
+	}
+	return p.Errors.Normalized(p.PID)
+}
+
+// HeaderErrorsKey is the context-document header slot the engine stamps the
+// ledger into, before FloMorphic lifts it onto the process row.
+const HeaderErrorsKey = "_errors"
+
+// LedgerFromHeader reads the ledger straight off a context document's header.
+//
+// The process row is the place to read it from — it is kept per pid, while the
+// context row is shared and overlapping runs of one document clobber each
+// other's header. This is the fallback for a FloMorphic that stores the header
+// but not yet the process column, so an upgrade of one half of the pair does
+// not lose the ledger.
+func LedgerFromHeader(header map[string]any) *RunErrors {
+	raw, ok := header[HeaderErrorsKey]
+	if !ok || raw == nil {
+		return nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var e RunErrors
+	if err := json.Unmarshal(b, &e); err != nil {
+		return nil
+	}
+	return e.Normalized("")
+}
+
+// Normalized fills in what an engine may have left out and reports nil when the
+// ledger says nothing happened.
+//
+// Presence of the field is not the test: a clean run carries no ledger at all,
+// and an engine that predates it answers with an empty object. Having a count
+// is — and a ledger whose count was not filled in is counted from its items, so
+// a short answer is still reported rather than dropped.
+func (e *RunErrors) Normalized(pid string) *RunErrors {
+	if e == nil {
+		return nil
+	}
+	out := *e
+	if out.Items == nil {
+		out.Items = []NodeError{}
+	}
+	if out.Count == 0 {
+		out.Count = len(out.Items)
+	}
+	if out.Count == 0 {
+		return nil
+	}
+	if out.Pid == "" {
+		out.Pid = pid
+	}
+	return &out
 }

@@ -31,6 +31,13 @@ type Config struct {
 	FlomorphicURL       string
 	FlomorphicJWTSecret string
 
+	// FlomorphicPanelURL is where the FloMorphic web panel answers — not an API
+	// venapce calls, but the address its own pages link a flow, a run or a
+	// context document to, so an operator reading an outcome here can open the
+	// flow that produced it there. Empty disables those links (the panel may not
+	// be reachable from the operator's browser at all).
+	FlomorphicPanelURL string
+
 	// InfraHost is the hostname of the infra service. In the deploy compose it is
 	// the infra container name; in local dev the developer sets it. Venapce uses it
 	// for both infra ports: the plugin connects to NATS on :4222, and osctrl-space
@@ -128,6 +135,7 @@ func Load() Config {
 
 		FlomorphicURL:       strings.TrimRight(env("FLOMORPHIC_URL", ""), "/"),
 		FlomorphicJWTSecret: env("FLOMORPHIC_JWT_SECRET", ""),
+		FlomorphicPanelURL:  strings.TrimRight(env("FLOMORPHIC_PANEL_URL", ""), "/"),
 
 		InfraHost: env("INFRA_HOST", "infra"),
 

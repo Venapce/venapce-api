@@ -108,6 +108,9 @@ func tableFrom(method, title, name string, mdl any) table {
 		if col == "id" {
 			continue // the primary key is handled by readID, never a plain field
 		}
+		if notWritable[col] {
+			continue
+		}
 		k, ok := kindOf(f.Type)
 		if !ok {
 			continue
@@ -116,6 +119,12 @@ func tableFrom(method, title, name string, mdl any) table {
 	}
 	return t
 }
+
+// notWritable are columns venapce fills on the run's behalf and a flow has no
+// business rewriting: `errors` is the ledger FloMorphic lifted off the engine —
+// the record of what went wrong while this very flow ran — so exposing it as a
+// form field would only invite a node to paper over it.
+var notWritable = map[string]bool{"errors": true}
 
 // columnName reads a model field's database column name from its json tag,
 // converting the sqlc camelCase tag back to the snake_case column (issueId →
@@ -234,7 +243,11 @@ func runWrite(pool *pgxpool.Pool, job *sdkv1.Job, build func(map[string]any) (st
 
 	job.Progress(50, sdkv1.Frame{Title: "writing", Content: preview(sql)})
 
-	ctx, cancel := context.WithTimeout(context.Background(), jobTimeout)
+	// Parented on the job, not on Background: the write then shares the
+	// handler's lifetime, and the statement is bounded by jobTimeout as before.
+	// These writes take no stop middleware — a single statement finishes in
+	// milliseconds, so there is nothing a stop would usefully interrupt.
+	ctx, cancel := context.WithTimeout(job.Context(), jobTimeout)
 	defer cancel()
 
 	row, err := queryRow(ctx, pool, sql, args)

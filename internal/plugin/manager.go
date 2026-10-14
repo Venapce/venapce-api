@@ -11,6 +11,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/Inflowenger/go-plugin-sdk/jobstop"
 	natsHandler "github.com/Inflowenger/go-plugin-sdk/nats"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -54,8 +55,13 @@ type Manager struct {
 	pool *pgxpool.Pool
 	osc  *osctrl.Manager
 
-	mu       sync.Mutex
-	current  *sdkv1.Plugin
+	mu      sync.Mutex
+	current *sdkv1.Plugin
+	// stops is the running plugin's jobstop registry — the jobs it holds are
+	// this connection's in-flight osquery queries. A new plugin gets a new one,
+	// and the retired one is cancelled, so a restart cannot leave the previous
+	// connection's jobs polling osctrl for a flow nobody is listening to.
+	stops    *jobstop.Registry
 	fp       string
 	pluginID string
 	running  bool
@@ -121,6 +127,10 @@ func (m *Manager) Start(env Env) error {
 	// PLUGIN_ID, so this only reclaims the connection — it never races the new one.
 	if m.current != nil {
 		drainPlugin(m.current)
+		if m.stops != nil {
+			m.stops.CancelAll()
+			m.stops = nil
+		}
 		m.current = nil
 		m.running = false
 	}
@@ -140,7 +150,8 @@ func (m *Manager) Start(env Env) error {
 		return fmt.Errorf("venapce plugin: connect to infra: %w", err)
 	}
 
-	register(p, m.pool, m.osc)
+	stops := &jobstop.Registry{}
+	register(p, stops, m.pool, m.osc)
 
 	if err := p.Start(); err != nil {
 		m.lastErr = fmt.Sprintf("start: %v", err)
@@ -148,6 +159,7 @@ func (m *Manager) Start(env Env) error {
 	}
 
 	m.current = p
+	m.stops = stops
 	m.fp = fp
 	m.pluginID = env.PluginID
 	m.running = true

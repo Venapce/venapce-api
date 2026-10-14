@@ -49,6 +49,7 @@ func New(pool *pgxpool.Pool, box *cryptobox.Box, cfg config.Config) *Server {
 			URL:       cfg.FlomorphicURL,
 			JWTSecret: cfg.FlomorphicJWTSecret,
 			InfraHost: cfg.InfraHost,
+			PanelURL:  cfg.FlomorphicPanelURL,
 		}),
 		cfg: cfg,
 	}

@@ -1,8 +1,12 @@
 package osquery
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
+
+	"github.com/Inflowenger/go-plugin-sdk/jobstop"
 )
 
 func TestQueryFormParsesAndHasNoSettings(t *testing.T) {
@@ -249,5 +253,46 @@ func TestResultRowCountLooksInsideEnvelopes(t *testing.T) {
 	}
 	if n := resultRowCount(rows[:1]); n != 0 {
 		t.Errorf("empty result must count 0, got %d", n)
+	}
+}
+
+func TestActionsCarryStopMiddleware(t *testing.T) {
+	stops := &jobstop.Registry{}
+	for _, a := range Actions(nil, stops) {
+		if len(a.Middleware) != 1 {
+			t.Errorf("%s: want 1 middleware function (the stop registry's), got %d", a.Method, len(a.Middleware))
+		}
+	}
+	// A nil registry must not leave a nil function in the list: sdkv1.Use skips
+	// them, and a nil one reached at dispatch would reject every request.
+	for _, a := range Actions(nil, nil) {
+		if len(a.Middleware) != 0 {
+			t.Errorf("%s: want no middleware without a registry, got %d", a.Method, len(a.Middleware))
+		}
+	}
+}
+
+func TestStoppedDistinguishesStopFromJobTimeout(t *testing.T) {
+	// The job's own deadline passing is not a stop: such a job still reports
+	// whatever rows arrived.
+	expired, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-expired.Done()
+	if stopped(expired) {
+		t.Error("a job that ran out of its own time must not count as stopped")
+	}
+
+	// A stop on the job's context is visible through the WithTimeout wrapper the
+	// handler derives for the run→poll→collect cycle.
+	base, stop := context.WithCancelCause(context.Background())
+	derived, cancel2 := context.WithTimeout(base, jobTimeout)
+	defer cancel2()
+	stop(jobstop.ErrStopped)
+	if !stopped(derived) {
+		t.Error("a runtime stop on the parent must be seen through the derived context")
+	}
+
+	if stopped(context.Background()) {
+		t.Error("a live context must not count as stopped")
 	}
 }

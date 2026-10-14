@@ -12,12 +12,14 @@ package osquery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/Inflowenger/go-plugin-sdk/formkit"
+	"github.com/Inflowenger/go-plugin-sdk/jobstop"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 
 	"github.com/Venapce/venapce-api/internal/osctrl"
@@ -79,8 +81,17 @@ var queryByTagsForm = formkit.New("Run osquery by tags").
 	).Build()
 
 // Actions returns the osquery module's actions, bound to venapce's osctrl.
-func Actions(m *osctrl.Manager) []sdkv1.Action {
-	return []sdkv1.Action{queryAction(m), queryByTagsAction(m)}
+// Actions returns the two query actions. Both take the plugin's stop
+// middleware: a dispatched query polls osctrl for up to jobTimeout, which is far
+// longer than a stopped flow is worth waiting for, and the rows of a run nobody
+// is listening to are of no use to anyone. stops may be nil (sdkv1.Use skips nil
+// functions), which leaves the actions un-stoppable but working.
+func Actions(m *osctrl.Manager, stops *jobstop.Registry) []sdkv1.Action {
+	var mw sdkv1.MiddlewareFunc
+	if stops != nil {
+		mw = stops.Middleware
+	}
+	return []sdkv1.Action{queryAction(m, mw), queryByTagsAction(m, mw)}
 }
 
 // Metas returns the picker lookups the query forms use.
@@ -126,13 +137,14 @@ func resolveClientEnv(job *sdkv1.Job, m *osctrl.Manager, in queryInput) (cl *osc
 	return cl, env, true
 }
 
-func queryAction(m *osctrl.Manager) sdkv1.Action {
+func queryAction(m *osctrl.Manager, mw sdkv1.MiddlewareFunc) sdkv1.Action {
 	return sdkv1.Action{
 		Method:      methodQuery,
 		Title:       "Run osquery on a node",
 		Description: "Dispatch an osquery SQL to one enrolled node via osctrl and return the rows it reports.",
 		Icon:        sdkv1.Icon{Icon: "mdi-database-search"},
 		Form:        queryForm,
+		Middleware:  sdkv1.Use(mw),
 		RequestHandler: func(job sdkv1.Job) {
 			req, err := sdkv1.CastRequestTo[queryInput](job.Req.Data)
 			if err != nil {
@@ -152,7 +164,7 @@ func queryAction(m *osctrl.Manager) sdkv1.Action {
 				return
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), jobTimeout)
+			ctx, cancel := context.WithTimeout(job.Context(), jobTimeout)
 			defer cancel()
 			runQuery(ctx, &job, cl, env, target{
 				request: osctrl.DistributedQueryRequest{Query: in.SQL, UUIDList: []string{uuid}},
@@ -163,13 +175,14 @@ func queryAction(m *osctrl.Manager) sdkv1.Action {
 	}
 }
 
-func queryByTagsAction(m *osctrl.Manager) sdkv1.Action {
+func queryByTagsAction(m *osctrl.Manager, mw sdkv1.MiddlewareFunc) sdkv1.Action {
 	return sdkv1.Action{
 		Method:      methodQueryByTags,
 		Title:       "Run osquery by tags",
 		Description: "Dispatch an osquery SQL to every active node carrying any of the selected osctrl tags and return the rows they report.",
 		Icon:        sdkv1.Icon{Icon: "mdi-tag-multiple"},
 		Form:        queryByTagsForm,
+		Middleware:  sdkv1.Use(mw),
 		RequestHandler: func(job sdkv1.Job) {
 			req, err := sdkv1.CastRequestTo[queryInput](job.Req.Data)
 			if err != nil {
@@ -189,7 +202,7 @@ func queryByTagsAction(m *osctrl.Manager) sdkv1.Action {
 				return
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), jobTimeout)
+			ctx, cancel := context.WithTimeout(job.Context(), jobTimeout)
 			defer cancel()
 
 			// osctrl ignores a tag it does not know rather than matching zero
@@ -231,6 +244,9 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 
 	name, err := cl.RunQuery(ctx, env, t.request)
 	if err != nil {
+		if stopped(ctx) {
+			return
+		}
 		job.DoneWithError("dispatch failed: " + err.Error())
 		return
 	}
@@ -242,6 +258,9 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 	job.Progress(85, sdkv1.Frame{Title: "collecting", Content: "reading results for " + name})
 	rows, total, err := collectRows(ctx, cl, env, name)
 	if err != nil {
+		if stopped(ctx) {
+			return
+		}
 		job.DoneWithError("collecting results failed: " + err.Error())
 		return
 	}
@@ -305,7 +324,7 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 	// column) so a flow or assistant reading the context sees why, instead of
 	// a green run whose only symptom is a non-zero `errors` count.
 	if succeeded == 0 && failed > 0 {
-		finish(job, name, func() any { return job.DoneWithErrorData(failureSummary(failed, failures), out) })
+		finish(ctx, job, name, func() any { return job.DoneWithErrorData(failureSummary(failed, failures), out) })
 		return
 	}
 	switch {
@@ -318,7 +337,23 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 	case succeeded > 0 && matched == 0:
 		out["note"] = fmt.Sprintf("the query ran on %d node(s) and matched no rows", succeeded)
 	}
-	finish(job, name, func() any { return job.Done(out) })
+	finish(ctx, job, name, func() any { return job.Done(out) })
+}
+
+// stopped reports whether the job's context ended because the runtime stopped
+// the job's process — a user stop, a stop command, the flow's timeout, the
+// node's idle window — rather than because the job's own jobTimeout passed.
+// context.Cause reads the cause through the WithTimeout wrapper, so a stop that
+// cancelled the parent is still visible here.
+//
+// It matters because the two endings want opposite things: a job that ran out of
+// its own time still reports what it collected, while a stopped job must say
+// nothing at all. The runtime has concluded a stopped process and torn down its
+// command subjects, so a Done sent to it finds no responder and only burns the
+// SDK's send timeout, twice over, on the retry in finish.
+func stopped(ctx context.Context) bool {
+	cause := context.Cause(ctx)
+	return errors.Is(cause, jobstop.ErrStopped) || errors.Is(cause, jobstop.ErrShutdown)
 }
 
 // finish sends the job's final command and refuses to let a failed send pass
@@ -326,7 +361,11 @@ func runQuery(ctx context.Context, job *sdkv1.Job, cl *osctrl.Client, env string
 // job whose Done never reached the runtime leaves the node with an empty
 // context and no hint why. On failure it logs and retries once, then ends the
 // job with an error carrying the reason so the flow at least sees that.
-func finish(job *sdkv1.Job, name string, send func() any) {
+func finish(ctx context.Context, job *sdkv1.Job, name string, send func() any) {
+	if stopped(ctx) {
+		log.Printf("osquery: job %s (%s): flow stopped — winding down without reporting", job.JobId, name)
+		return
+	}
 	err, failed := send().(error)
 	if !failed {
 		return

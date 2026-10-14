@@ -30,13 +30,18 @@ type flomorphicAPIConfig struct {
 	URL          string `json:"url,omitempty"`
 	JWTSecretEnc string `json:"jwt_secret_enc,omitempty"`
 	InfraHost    string `json:"infra_host,omitempty"`
+	// PanelURL is where the FloMorphic web panel answers — what venapce's pages
+	// link a flow or a run to. It is a browser-side address, so it is often not
+	// the API base at all (a reverse proxy, a different host name) and the
+	// operator is the only one who knows it.
+	PanelURL string `json:"panel_url,omitempty"`
 }
 
 // set reports whether the row carries anything at all — a cleared override is
 // stored as an empty object rather than deleted, so this is the "is overridden"
 // test everywhere.
 func (c flomorphicAPIConfig) set() bool {
-	return c.URL != "" || c.JWTSecretEnc != "" || c.InfraHost != ""
+	return c.URL != "" || c.JWTSecretEnc != "" || c.InfraHost != "" || c.PanelURL != ""
 }
 
 func (s *Server) loadFlomorphicAPIConfig(ctx context.Context) (flomorphicAPIConfig, error) {
@@ -66,9 +71,13 @@ func (s *Server) effectiveFlomorphicAccess(ctx context.Context) (flomorphic.Acce
 		URL:       s.cfg.FlomorphicURL,
 		JWTSecret: s.cfg.FlomorphicJWTSecret,
 		InfraHost: s.cfg.InfraHost,
+		PanelURL:  s.cfg.FlomorphicPanelURL,
 	}
 	if stored.URL != "" {
 		access.URL = stored.URL
+	}
+	if stored.PanelURL != "" {
+		access.PanelURL = stored.PanelURL
 	}
 	if stored.InfraHost != "" {
 		access.InfraHost = stored.InfraHost
@@ -112,6 +121,9 @@ func (s *Server) flomorphicAccessView(ctx context.Context) (fiber.Map, error) {
 		"apiUrl":        access.URL,
 		"jwtSecretSet":  access.JWTSecret != "",
 		"infraHost":     access.InfraHost,
+		// Where the panel is, for the "open in FloMorphic" links. Empty means the
+		// operator has not said, and those links stay out of the way.
+		"panelUrl": access.PanelURL,
 		// True while nothing is stored: the values are the deploy environment's and
 		// change only by editing .env + recreating the container.
 		"apiFromEnv": !stored.set(),
@@ -124,6 +136,9 @@ type putFlomorphicAPIBody struct {
 	// back to the environment's.
 	JWTSecret string `json:"jwtSecret"`
 	InfraHost string `json:"infraHost"`
+	// Where the FloMorphic panel answers in a browser, for the links venapce's
+	// pages point at a flow or a run. Optional: blank clears it.
+	PanelURL string `json:"panelUrl"`
 }
 
 // PUT /api/settings/flomorphic/api — save where FloMorphic is, rebuild the live
@@ -155,6 +170,7 @@ func (s *Server) putFlomorphicAPISettings(c fiber.Ctx) error {
 		URL:          url,
 		JWTSecretEnc: secretEnc,
 		InfraHost:    strings.TrimSpace(body.InfraHost),
+		PanelURL:     strings.TrimRight(strings.TrimSpace(body.PanelURL), "/"),
 	}
 	value, err := json.Marshal(cfg)
 	if err != nil {

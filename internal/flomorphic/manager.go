@@ -18,6 +18,11 @@ type Access struct {
 	URL       string
 	JWTSecret string
 	InfraHost string
+	// PanelURL is where the FloMorphic web panel answers, for the links venapce's
+	// own pages point at a flow, a run or a context document. Nothing here calls
+	// it; it is carried alongside the API access because it is the other half of
+	// "where FloMorphic is" and is set in the same place.
+	PanelURL string
 }
 
 // Configured reports whether the access is complete enough to build a client.
@@ -47,6 +52,7 @@ func (m *Manager) Set(a Access) {
 	a.URL = strings.TrimRight(strings.TrimSpace(a.URL), "/")
 	a.JWTSecret = strings.TrimSpace(a.JWTSecret)
 	a.InfraHost = strings.TrimSpace(a.InfraHost)
+	a.PanelURL = strings.TrimRight(strings.TrimSpace(a.PanelURL), "/")
 	client := NewClient(a.URL, a.JWTSecret)
 	m.mu.Lock()
 	m.access, m.client = a, client

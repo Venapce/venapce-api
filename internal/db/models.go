@@ -28,6 +28,7 @@ type Activity struct {
 	Pid         string          `json:"pid"`
 	ContextID   string          `json:"contextId"`
 	Error       string          `json:"error"`
+	Errors      json.RawMessage `json:"errors"`
 	Ref         json.RawMessage `json:"ref"`
 	Data        json.RawMessage `json:"data"`
 	Meta        json.RawMessage `json:"meta"`

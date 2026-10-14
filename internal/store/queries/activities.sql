@@ -38,9 +38,9 @@ SELECT * FROM activities WHERE id = $1;
 
 -- name: CreateActivity :one
 INSERT INTO activities (subject_kind, subject_id, kind, status, title, description, remediation, proof,
-                        facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error,
+                        facts, tags, origin, flow_id, flow_title, process_id, pid, context_id, error, errors,
                         ref, data, meta, started_at, finished_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 RETURNING *;
 
 -- name: UpdateActivity :one
@@ -48,7 +48,7 @@ UPDATE activities
    SET subject_kind = $2, subject_id = $3, kind = $4, status = $5, title = $6, description = $7,
        remediation = $8, proof = $9, facts = $10, tags = $11, origin = $12, flow_id = $13,
        flow_title = $14, process_id = $15, pid = $16, context_id = $17, error = $18,
-       ref = $19, data = $20, meta = $21, started_at = $22, finished_at = $23,
+       errors = $19, ref = $20, data = $21, meta = $22, started_at = $23, finished_at = $24,
        updated_at = now()
  WHERE id = $1
 RETURNING *;

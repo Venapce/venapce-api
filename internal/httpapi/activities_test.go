@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Venapce/venapce-api/internal/db"
+	"github.com/Venapce/venapce-api/internal/flomorphic"
 )
 
 // A flow may leave facts as the canonical list or as a plain object; both
@@ -77,5 +78,76 @@ func TestLiftOutcome(t *testing.T) {
 	liftOutcome(&b, map[string]any{"outcome": map[string]any{"data": []any{1, 2}}, "scratch": 1})
 	if string(b.Data) != `[1,2]` {
 		t.Errorf("explicit outcome.data should be kept as-is, got %s", b.Data)
+	}
+}
+
+// A run that hit node errors and still completed must not read as a clean one:
+// the ledger lands in `errors`, and `error` — empty, because nothing was fatal —
+// gets the summary so every list and caller that reads it alone says so.
+func TestLiftErrors(t *testing.T) {
+	ledger := &flomorphic.RunErrors{Pid: "p1", Count: 3, Items: []flomorphic.NodeError{
+		{Ts: 1, Kind: "node", Flow: "f1", Node: "n1", Src: "js", Code: 25, Msg: "boom"},
+		{Ts: 2, Kind: "system", Flow: "f1", Node: "n2", Src: "rt", Code: 19, Msg: "infra silent"},
+	}}
+
+	var a db.Activity
+	liftErrors(&a, ledger)
+	if a.Error != "3 errors recorded during this run · 1 node, 1 system" {
+		t.Errorf("error = %q, want the ledger's summary", a.Error)
+	}
+	if got := activityErrors(a.Errors); got == nil || got.Count != 3 || len(got.Items) != 2 {
+		t.Errorf("stored ledger = %+v, want 3 counted / 2 carried", got)
+	}
+
+	// A fatal cause already on the row is the better message; the ledger does
+	// not overwrite it.
+	fatal := db.Activity{Error: "the engine stopped"}
+	liftErrors(&fatal, ledger)
+	if fatal.Error != "the engine stopped" {
+		t.Errorf("error = %q, want the fatal cause kept", fatal.Error)
+	}
+
+	// A clean run stores an empty object, not null — `errors` is NOT NULL.
+	clean := db.Activity{Error: ""}
+	liftErrors(&clean, nil)
+	if string(clean.Errors) != "{}" || clean.Error != "" {
+		t.Errorf("clean run = %s / %q, want {} and no error", clean.Errors, clean.Error)
+	}
+	if got := activityErrors(clean.Errors); got != nil {
+		t.Errorf("activityErrors({}) = %+v, want nil", got)
+	}
+}
+
+// The ledger is read off the process row, and off the context header only when
+// the process row has none — an engine that stamps the header into a FloMorphic
+// that does not yet lift it must not lose it.
+func TestProcessLedger(t *testing.T) {
+	if got := (&flomorphic.Process{}).Ledger(); got != nil {
+		t.Errorf("a run that recorded nothing = %+v, want nil", got)
+	}
+	// An empty object from an engine that predates the ledger is not an error.
+	if got := (&flomorphic.Process{Errors: &flomorphic.RunErrors{}}).Ledger(); got != nil {
+		t.Errorf("empty ledger = %+v, want nil", got)
+	}
+	// No count filled in: counted from the items, and the run's pid stamped on.
+	p := &flomorphic.Process{PID: "p9", Errors: &flomorphic.RunErrors{Items: []flomorphic.NodeError{{Msg: "x"}}}}
+	got := p.Ledger()
+	if got == nil || got.Count != 1 || got.Pid != "p9" {
+		t.Fatalf("ledger = %+v, want count 1 on pid p9", got)
+	}
+	// An item with no kind is the flow's own, which is what Summary counts.
+	if want := "1 error recorded during this run · 1 node"; got.Summary() != want {
+		t.Errorf("summary = %q, want %q", got.Summary(), want)
+	}
+
+	header := map[string]any{"_errors": map[string]any{"pid": "p9", "count": 2, "items": []any{
+		map[string]any{"kind": "system", "msg": "infra silent"},
+	}}}
+	from := flomorphic.LedgerFromHeader(header)
+	if from == nil || from.Count != 2 || len(from.Items) != 1 {
+		t.Errorf("header ledger = %+v, want 2 counted / 1 carried", from)
+	}
+	if flomorphic.LedgerFromHeader(map[string]any{}) != nil {
+		t.Error("a header with no _errors should yield no ledger")
 	}
 }

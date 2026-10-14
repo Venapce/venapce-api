@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS activities (
     pid          TEXT        NOT NULL DEFAULT '',
     context_id   TEXT        NOT NULL DEFAULT '',
     error        TEXT        NOT NULL DEFAULT '',
+    errors       JSONB       NOT NULL DEFAULT '{}'::jsonb,
     ref          JSONB       NOT NULL DEFAULT '{}'::jsonb,
     data         JSONB       NOT NULL DEFAULT '{}'::jsonb,
     meta         JSONB       NOT NULL DEFAULT '{}'::jsonb,
@@ -200,6 +201,13 @@ CREATE TABLE IF NOT EXISTS activities (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- `errors` is the run's error ledger as FloMorphic lifted it off the engine:
+-- {pid, count, items:[{ts,kind,flow,node,src,code,msg,loc}]}. A node error does
+-- not stop a flow, so a run can be `finished` and still carry one — `error`
+-- alone (the single fatal cause) cannot say that, and without the ledger a run
+-- that failed at five nodes and completed anyway reads as a clean one. `{}` for
+-- a clean run and for every manual activity.
+ALTER TABLE activities ADD COLUMN IF NOT EXISTS errors JSONB NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_activities_subject ON activities (subject_kind, subject_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activities_status ON activities (status);
 CREATE INDEX IF NOT EXISTS idx_activities_process ON activities (process_id);

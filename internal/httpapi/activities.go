@@ -197,6 +197,7 @@ func (s *Server) createActivity(c fiber.Ctx) error {
 		Facts:       normalizeFacts(body.Facts),
 		Tags:        pickTags(nil, body.Tags),
 		Origin:      orDefault(pick("", body.Origin), "manual"),
+		Errors:      json.RawMessage("{}"),
 		Ref:         pickJSON(nil, body.Ref),
 		Data:        pickJSON(nil, body.Data),
 		Meta:        pickJSON(nil, body.Meta),
@@ -254,6 +255,7 @@ func (s *Server) updateActivity(c fiber.Ctx) error {
 		Pid:         cur.Pid,
 		ContextID:   cur.ContextID,
 		Error:       cur.Error,
+		Errors:      rawOr(cur.Errors, "{}"),
 		Ref:         pickJSON(cur.Ref, body.Ref),
 		Data:        pickJSON(cur.Data, body.Data),
 		Meta:        pickJSON(cur.Meta, body.Meta),
@@ -433,6 +435,7 @@ func (s *Server) startRun(ctx context.Context, client *flomorphic.Client, flow f
 		Origin:      "flow:" + flow.ID,
 		FlowID:      flow.ID,
 		FlowTitle:   flow.Title,
+		Errors:      json.RawMessage("{}"),
 		Ref:         json.RawMessage("{}"),
 		Data:        json.RawMessage("{}"),
 		Meta:        json.RawMessage("{}"),
@@ -582,14 +585,58 @@ func (s *Server) syncActivity(ctx context.Context, a db.Activity) (db.Activity, 
 		"indexId": proc.IndexID, "pid": proc.PID, "contextId": a.ContextID,
 		"status": proc.Status, "durationMs": proc.DurationMs,
 	}})
+	ledger := proc.Ledger()
 	if a.ContextID != "" {
 		if doc, err := client.GetContext(ctx, a.ContextID); err == nil {
 			liftOutcome(&a, doc.Document())
+			if ledger == nil {
+				ledger = flomorphic.LedgerFromHeader(doc.Header)
+			}
 		} else {
 			a.Ref = mergeJSON(a.Ref, map[string]any{"contextError": err.Error()})
 		}
 	}
+	liftErrors(&a, ledger)
 	return s.saveActivity(ctx, a)
+}
+
+// liftErrors records the run's error ledger on the activity, and makes sure a
+// run that hit something never reads as a clean one.
+//
+// A flow does not stop for a node error: fractal records it and carries on, so
+// FloMorphic can report `finished` on a run that failed at half its nodes with
+// `error` — the single fatal cause — left empty. When it is, the ledger's
+// summary stands in, so every list, badge and API caller that already reads
+// `error` says that something went wrong, and `errors` says what, where and
+// whose it was.
+func liftErrors(a *db.Activity, errs *flomorphic.RunErrors) {
+	if errs == nil {
+		a.Errors = json.RawMessage("{}")
+		return
+	}
+	b, err := json.Marshal(errs)
+	if err != nil {
+		return
+	}
+	a.Errors = b
+	if a.Error == "" {
+		a.Error = errs.Summary()
+	}
+}
+
+// activityErrors decodes the ledger stored on an activity, or nil when the run
+// recorded nothing. Every view that reports a run — not only the activity's own
+// page — reads it through this, so none of them has to know that a clean run is
+// stored as `{}`.
+func activityErrors(raw json.RawMessage) *flomorphic.RunErrors {
+	if len(raw) == 0 {
+		return nil
+	}
+	var e flomorphic.RunErrors
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return nil
+	}
+	return e.Normalized("")
 }
 
 // liftOutcome maps the run's final context document onto the activity: the
@@ -747,7 +794,8 @@ func (s *Server) saveActivity(ctx context.Context, a db.Activity) (db.Activity, 
 		Title: a.Title, Description: a.Description, Remediation: a.Remediation, Proof: a.Proof,
 		Facts: rawOr(a.Facts, "[]"), Tags: orEmpty(a.Tags), Origin: a.Origin, FlowID: a.FlowID,
 		FlowTitle: a.FlowTitle, ProcessID: a.ProcessID, Pid: a.Pid, ContextID: a.ContextID,
-		Error: a.Error, Ref: rawOr(a.Ref, "{}"), Data: rawOr(a.Data, "{}"), Meta: rawOr(a.Meta, "{}"),
+		Error: a.Error, Errors: rawOr(a.Errors, "{}"), Ref: rawOr(a.Ref, "{}"),
+		Data: rawOr(a.Data, "{}"), Meta: rawOr(a.Meta, "{}"),
 		StartedAt: a.StartedAt, FinishedAt: a.FinishedAt,
 	})
 }
@@ -797,8 +845,8 @@ func (s *Server) recordChange(ctx context.Context, kind string, id int64, actKin
 	_, err := s.q.CreateActivity(ctx, db.CreateActivityParams{
 		SubjectKind: kind, SubjectID: id, Kind: actKind, Status: actFinished, Title: title,
 		Facts: json.RawMessage("[]"), Tags: []string{}, Origin: origin,
-		Ref: refDoc, Data: json.RawMessage("{}"), Meta: json.RawMessage("{}"),
-		StartedAt: &now, FinishedAt: &now,
+		Errors: json.RawMessage("{}"), Ref: refDoc, Data: json.RawMessage("{}"),
+		Meta: json.RawMessage("{}"), StartedAt: &now, FinishedAt: &now,
 	})
 	if err != nil {
 		log.Printf("activities: could not record %s on %s #%d: %v", actKind, kind, id, err)

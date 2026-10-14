@@ -73,8 +73,12 @@ type operationView struct {
 	FlowsTotal    int                        `json:"flowsTotal"`
 	LastRunAt     *time.Time                 `json:"lastRunAt,omitempty"`
 	LastRunStatus string                     `json:"lastRunStatus,omitempty"`
-	InstalledAt   time.Time                  `json:"installedAt"`
-	UpdatedAt     time.Time                  `json:"updatedAt"`
+	// How many errors that run recorded. A flow does not stop for a node error,
+	// so the status alone can say `finished` about a run that hit a dozen — the
+	// list needs this to flag it.
+	LastRunErrors int       `json:"lastRunErrors,omitempty"`
+	InstalledAt   time.Time `json:"installedAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 // flowState is one manifest flow with its binding and last run.
@@ -95,6 +99,9 @@ type lastRun struct {
 	StartedAt  *time.Time `json:"startedAt,omitempty"`
 	FinishedAt *time.Time `json:"finishedAt,omitempty"`
 	Error      string     `json:"error,omitempty"`
+	// Everything the run recorded on its way through, so the flow's line on this
+	// page can say that it finished having hit things — and what they were.
+	Errors *flomorphic.RunErrors `json:"errors,omitempty"`
 }
 
 type operationDetail struct {
@@ -435,6 +442,9 @@ func (s *Server) view(ctx context.Context, op db.Operation, e *estate) (operatio
 			t = *a.StartedAt
 		}
 		v.LastRunAt, v.LastRunStatus = &t, a.Status
+		if errs := activityErrors(a.Errors); errs != nil {
+			v.LastRunErrors = errs.Count
+		}
 	}
 	return v, b, rd, nil
 }
@@ -456,7 +466,10 @@ func (s *Server) detail(ctx context.Context, op db.Operation) (*operationDetail,
 		if synced, err := s.syncActivity(ctx, a); err == nil {
 			a = synced
 		}
-		lastByFlow[a.FlowID] = &lastRun{ID: a.ID, Status: a.Status, Title: a.Title, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Error: a.Error}
+		lastByFlow[a.FlowID] = &lastRun{
+			ID: a.ID, Status: a.Status, Title: a.Title, StartedAt: a.StartedAt,
+			FinishedAt: a.FinishedAt, Error: a.Error, Errors: activityErrors(a.Errors),
+		}
 	}
 	flows := make([]flowState, 0, len(b.Manifest.Flows))
 	docs := map[string]string{}

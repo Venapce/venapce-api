@@ -64,12 +64,18 @@ func TestColumnsDerivedFromModel(t *testing.T) {
 		t.Errorf("stage columns = %v, want %v", g, wantStages)
 	}
 	// Activities: the nullable started_at / finished_at are *time.Time in the
-	// model — DB-managed from the API's side, so they must not become fields.
+	// model — DB-managed from the API's side, so they must not become fields —
+	// and `errors` is the run's own ledger, excluded by notWritable.
 	wantActivities := []string{"subject_kind", "subject_id", "kind", "status", "title", "description",
 		"remediation", "proof", "facts", "tags", "origin", "flow_id", "flow_title", "process_id", "pid",
 		"context_id", "error", "ref", "data", "meta"}
 	if g := got(activities); strings.Join(g, ",") != strings.Join(wantActivities, ",") {
 		t.Errorf("activities columns = %v, want %v", g, wantActivities)
+	}
+	for _, c := range activities.columns {
+		if notWritable[c.name] {
+			t.Errorf("activities: %q is not a flow's to write", c.name)
+		}
 	}
 	if !issues.hasUpdatedAt || !findings.hasUpdatedAt || !stages.hasUpdatedAt || !activities.hasUpdatedAt {
 		t.Error("all tables have updated_at and should stamp it")
