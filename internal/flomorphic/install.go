@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -130,4 +131,54 @@ func (c *Client) ExportFlow(ctx context.Context, id string) (json.RawMessage, er
 		return nil, fmt.Errorf("invalid export document")
 	}
 	return data, nil
+}
+
+// SettingsProfile is one node settings profile on the install: the named
+// key/value bundle (an account, an API key, a provider endpoint) a node binds
+// by id. Venapce never reads a profile's values — only that it exists and what
+// it is called, so it can tell the operator which nodes still have nothing to
+// bind.
+type SettingsProfile struct {
+	ID         string `json:"id"`
+	NodeUniqID string `json:"nodeUniqId"`
+	NodeType   string `json:"nodeType"`
+	Title      string `json:"title"`
+}
+
+// SettingsBucket is the identity a profile binds to, as FloMorphic keys them:
+// a node of an imported plugin gets its own bucket per plugin identity, and
+// every builtin shares one bucket per node kind (all `llm` nodes offer the same
+// profiles). pluginID is this install's address for the plugin, so the bucket
+// is resolved from the action list, never carried in a package.
+func SettingsBucket(kind, pluginID string) string {
+	if p := strings.TrimSpace(pluginID); p != "" {
+		return "ext:" + p
+	}
+	return strings.TrimSpace(kind)
+}
+
+// ListSettingsProfiles returns the profiles in one bucket (see SettingsBucket)
+// — what the node's drawer offers in its profile picker. An empty answer means
+// the operator has to create one before any node of that kind can run.
+func (c *Client) ListSettingsProfiles(ctx context.Context, bucket string) ([]SettingsProfile, error) {
+	bucket = strings.TrimSpace(bucket)
+	if bucket == "" {
+		return nil, fmt.Errorf("a settings bucket is required")
+	}
+	q := url.Values{"node": {bucket}, "per_page": {"200"}}
+	data, err := c.do(ctx, http.MethodGet, "/settings?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	var p page[SettingsProfile]
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, fmt.Errorf("invalid settings list: %w", err)
+	}
+	out := make([]SettingsProfile, 0, len(p.List))
+	for _, prof := range p.List {
+		if strings.TrimSpace(prof.ID) != "" {
+			out = append(out, prof)
+		}
+	}
+	return out, nil
 }

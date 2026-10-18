@@ -640,6 +640,11 @@ func (s *Server) importOperation(c fiber.Ctx) error {
 			"readme":    b.Files[m.ReadmePath()],
 			"source":    src,
 			"problems":  orEmpty(errs),
+			// The plugins the flows call as this FloMorphic actually has them,
+			// and the nodes whose settings profile the operator will have to
+			// pick — the wizard asks for those the way it asks for the params,
+			// because no install can carry them and every install resets them.
+			"settings": s.settingsPlanFor(c.Context(), b, binds, e, false),
 		}
 		if exists {
 			res["existing"] = fiber.Map{"id": existing.ID, "version": existing.Version}

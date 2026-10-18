@@ -8,9 +8,10 @@ import (
 	"testing"
 )
 
-// The example package shipped with the wapp (the cookbook fleet audit,
-// parameterized) is the fixture: what the folder importer sends.
-const examplePkg = "../../../venapce-wapp/examples/operations/linux-fleet-http-audit"
+// A published package (the cookbook fleet audit, parameterized) is the
+// fixture: what the folder importer sends. It is read from a sibling clone of
+// github.com/Venapce/operations; the tests skip when that is not checked out.
+const examplePkg = "../../../operations/linux-fleet-http-audit"
 
 func loadExample(t *testing.T) *Bundle {
 	t.Helper()

@@ -199,6 +199,9 @@ func (s *Server) App() *fiber.App {
 	api.Get("/operations", s.listOperations)
 	api.Post("/operations/import", s.importOperation) // {url|bundle, source, params, dryRun}
 	api.Get("/operations/:id", s.getOperation)
+	// The plugins and node settings profiles the package cannot carry: what the
+	// operator still has to bind in FloMorphic, with the bound flows read back.
+	api.Get("/operations/:id/settings", s.getOperationSettings)
 	api.Delete("/operations/:id", s.deleteOperation)
 	api.Post("/operations/:id/update", s.updateOperation)
 	api.Put("/operations/:id/params", s.putOperationParams)
