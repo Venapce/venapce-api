@@ -16,6 +16,7 @@ import (
 
 	"github.com/Venapce/venapce-api/internal/db"
 	"github.com/Venapce/venapce-api/internal/flomorphic"
+	tagutil "github.com/Venapce/venapce-api/internal/tags"
 )
 
 // Activities — the history of a pipeline row and the outcome of every flow run
@@ -65,18 +66,78 @@ type fact struct {
 
 // ---- HTTP: flows (picker) ----
 
-// GET /api/flows?search= — the FloMorphic flows an operator can run a row
-// through. Needs the FloMorphic API access from Settings.
+// GET /api/flows?search=&tags= — the FloMorphic flows an operator can run a
+// row through. Needs the FloMorphic API access from Settings.
+//
+// `tags` is a comma-separated match-ANY label filter, applied by FloMorphic
+// (GET /flow?tags=), not here — so it narrows the page FloMorphic returns
+// rather than a page already truncated at 200. It is how the run picker shows
+// the flows one operation installed instead of every flow on a shared canvas:
+// an operation stamps its labels on its flows at install time (see
+// Manifest.FlowTagsFor) and the picker asks for them by name. An absent or
+// empty `tags` is the unfiltered list — clearing the filter is the same call
+// without the parameter.
 func (s *Server) listFlows(c fiber.Ctx) error {
 	client := s.flo.Get()
 	if client == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "FloMorphic API access is not configured (Settings → FloMorphic)")
 	}
-	flows, err := client.ListFlows(c.Context(), c.Query("search"), 200)
+	flows, err := client.ListFlows(c.Context(), c.Query("search"), tagutil.Split(c.Query("tags")), 200)
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadGateway, err.Error())
 	}
 	return c.JSON(flows)
+}
+
+// flowTagFacets is what GET /api/flows/tags answers: the installed operations
+// and the labels each one stamped on its flows, plus the union of them all.
+//
+// It exists so the run picker's filter can offer "this operation" by name
+// without the browser reading every installed package's manifest. `tags` is
+// there for a picker that wants to offer bare labels too — including the ones
+// an author put on a single flow inside a package.
+type flowTagFacets struct {
+	Operations []flowTagOperation `json:"operations"`
+	Tags       []string           `json:"tags"`
+}
+
+type flowTagOperation struct {
+	ID   int64    `json:"id"`
+	Name string   `json:"name"`
+	Slug string   `json:"slug"`
+	Tags []string `json:"tags"`
+}
+
+// GET /api/flows/tags — the operation filter's menu. Read-only and derived
+// entirely from installed packages, so it answers even when FloMorphic is
+// unreachable: the picker can still show its filter beside the error that says
+// the flow list could not be loaded.
+func (s *Server) flowTags(c fiber.Ctx) error {
+	ops, err := s.q.ListOperations(c.Context())
+	if err != nil {
+		return err
+	}
+	out := flowTagFacets{Operations: []flowTagOperation{}, Tags: []string{}}
+	var all [][]string
+	for _, op := range ops {
+		b, err := s.loadBundle(op)
+		if err != nil {
+			// An unreadable manifest is already reported by the operations
+			// list; here it just means one operation cannot be offered.
+			log.Printf("flows: operation #%d unreadable, no tag facet: %v", op.ID, err)
+			continue
+		}
+		labels := b.Manifest.AllFlowTags()
+		if len(labels) == 0 {
+			continue
+		}
+		out.Operations = append(out.Operations, flowTagOperation{
+			ID: op.ID, Name: b.Manifest.Name, Slug: b.Manifest.ID, Tags: labels,
+		})
+		all = append(all, labels)
+	}
+	out.Tags = tagutil.Union(all...)
+	return c.JSON(out)
 }
 
 // ---- HTTP: activities ----

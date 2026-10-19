@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	tagutil "github.com/Venapce/venapce-api/internal/tags"
 )
 
 // The run side of the FloMorphic API: the flows an operator can pick, the
@@ -17,11 +19,16 @@ import (
 
 // Flow is the subset of a FloMorphic workflow row a picker needs. The graph
 // itself (view_flow) is not carried.
+//
+// Tags are the flow's labels on FloMorphic — what an operation stamps on the
+// flows it installs, and what the run picker narrows by so an operator sees the
+// handful their operation brought instead of every flow on the canvas.
 type Flow struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Tags      []string `json:"tags"`
+	CreatedAt int64    `json:"createdAt"`
+	UpdatedAt int64    `json:"updatedAt"`
 }
 
 // page is FloMorphic's page envelope: { list, total, page, per_page, total_pages }.
@@ -33,13 +40,21 @@ type page[T any] struct {
 // ListFlows returns up to perPage flows matching search (newest first as
 // FloMorphic orders them). A search shorter than FloMorphic's minimum is sent
 // as-is and FloMorphic answers 400, which surfaces as an error.
-func (c *Client) ListFlows(ctx context.Context, search string, perPage int) ([]Flow, error) {
+//
+// tags is a match-ANY label filter applied by FloMorphic, not here: a flow is
+// kept when it carries at least one of them. Empty means no filter — the whole
+// list, which is what the picker shows until someone narrows it, and what it
+// shows again the moment they clear the filter.
+func (c *Client) ListFlows(ctx context.Context, search string, tags []string, perPage int) ([]Flow, error) {
 	if perPage <= 0 {
 		perPage = 100
 	}
 	q := url.Values{"per_page": {strconv.Itoa(perPage)}}
 	if s := strings.TrimSpace(search); s != "" {
 		q.Set("search", s)
+	}
+	if clean := tagutil.Clean(tags); len(clean) > 0 {
+		q.Set("tags", strings.Join(clean, ","))
 	}
 	data, err := c.do(ctx, http.MethodGet, "/flow?"+q.Encode(), nil)
 	if err != nil {

@@ -175,6 +175,9 @@ func (s *Server) App() *fiber.App {
 	// Activities: the history of a pipeline row (edits, promotions) and the
 	// outcome of every FloMorphic flow run on it. /flows lists what can be run.
 	api.Get("/flows", s.listFlows)
+	// The run picker's operation filter: which operations are installed and
+	// what labels each stamped on its flows.
+	api.Get("/flows/tags", s.flowTags)
 	api.Get("/activities", s.listActivities)
 	api.Get("/activities/tags", s.activityTags)
 	api.Post("/activities", s.createActivity)
@@ -207,6 +210,9 @@ func (s *Server) App() *fiber.App {
 	api.Put("/operations/:id/params", s.putOperationParams)
 	api.Get("/operations/:id/flows/:key/file", s.getOperationFlowFile)
 	api.Post("/operations/:id/flows/:key/install", s.installOperationFlow)
+	// Re-stamp the operation's flow labels on the flows it is already bound to
+	// (what the run picker's filter matches), without re-pushing their graphs.
+	api.Post("/operations/:id/flows/relabel", s.relabelOperationFlows)
 	api.Put("/operations/:id/flows/:key", s.linkOperationFlow)
 	api.Post("/operations/:id/run", s.runOperation)
 	// The export side: package flows from the canvas, zip an installed package,

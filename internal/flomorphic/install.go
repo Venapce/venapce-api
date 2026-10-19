@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	tagutil "github.com/Venapce/venapce-api/internal/tags"
 )
 
 // The install side of the FloMorphic API — what venapce's operation packages
@@ -49,13 +51,21 @@ type ImportResult struct {
 // existing flow (a re-install); empty creates one. `title` overrides the
 // file's own. FloMorphic re-stamps every plugin node from its own extension
 // table, so the file may come from any install.
-func (c *Client) ImportFlow(ctx context.Context, id, title string, workflow json.RawMessage, dryRun bool) (*ImportResult, error) {
+//
+// `tags` are the labels to stamp on the flow — the operation it belongs to, so
+// the run picker can narrow to it. Empty leaves whatever labels the document
+// itself carries, which keeps a package that declares none working exactly as
+// it did before tags existed.
+func (c *Client) ImportFlow(ctx context.Context, id, title string, tags []string, workflow json.RawMessage, dryRun bool) (*ImportResult, error) {
 	body := map[string]any{"workflow": workflow, "dryRun": dryRun}
 	if id = strings.TrimSpace(id); id != "" {
 		body["id"] = id
 	}
 	if title = strings.TrimSpace(title); title != "" {
 		body["title"] = title
+	}
+	if clean := tagutil.Clean(tags); len(clean) > 0 {
+		body["tags"] = clean
 	}
 	data, err := c.do(ctx, http.MethodPost, "/flow/import", body)
 	if err != nil {
@@ -72,6 +82,35 @@ func (c *Client) ImportFlow(ctx context.Context, id, title string, workflow json
 		res.MissingActions = []MissingAction{}
 	}
 	return &res, nil
+}
+
+// TagFlow relabels a flow already on FloMorphic (PUT /flow/id/:id/tags). When
+// merge is set the labels are added to what the flow carries; otherwise they
+// replace them.
+//
+// This is the "link to an existing flow" path's other half: an operator who
+// imported an operation's flow in FloMorphic by hand and then tells Venapce
+// which flow it became has a flow with no labels on it, which the operation
+// filter would never find. Relabelling it is a 60-byte call — importing the
+// graph again just to add a label would push tens of kilobytes and could
+// overwrite edits the operator made.
+func (c *Client) TagFlow(ctx context.Context, id string, tags []string, merge bool) ([]string, error) {
+	mode := "set"
+	if merge {
+		mode = "merge"
+	}
+	body := map[string]any{"tags": tagutil.Clean(tags), "mode": mode}
+	data, err := c.do(ctx, http.MethodPut, "/flow/id/"+url.PathEscape(strings.TrimSpace(id))+"/tags", body)
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, fmt.Errorf("invalid tag result: %w", err)
+	}
+	return res.Tags, nil
 }
 
 // PluginAction is one action method a registered plugin exposes, as the

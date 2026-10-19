@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/Venapce/venapce-api/internal/tags"
 )
 
 const (
@@ -39,6 +41,13 @@ type ParamSpec struct {
 }
 
 // FlowSpec is one workflow of the package.
+//
+// Tags are labels stamped on the flow when it is installed into FloMorphic, on
+// top of the package's own `flowTags`. They are what the "run a flow on this
+// row" picker filters by, so an operator applying one of this package's flows
+// to a row sees its handful rather than every flow on the canvas. Per-flow tags
+// are for narrowing inside a package — an operation that ships both a stage
+// sweep and a finding review can label them apart.
 type FlowSpec struct {
 	Key         string   `json:"key"`
 	File        string   `json:"file"`
@@ -50,6 +59,7 @@ type FlowSpec struct {
 	Subject     []string `json:"subject,omitempty"`
 	Schedule    string   `json:"schedule,omitempty"`
 	Writes      []string `json:"writes,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
 }
 
 type PluginReq struct {
@@ -85,17 +95,24 @@ type Requires struct {
 // Manifest is operation.json. Unknown keys survive a round trip through
 // `Raw`, which is what gets stored and served.
 type Manifest struct {
-	Schema      int                  `json:"schema"`
-	ID          string               `json:"id"`
-	Name        string               `json:"name"`
-	Version     string               `json:"version"`
-	Description string               `json:"description,omitempty"`
-	Readme      string               `json:"readme,omitempty"`
-	Tags        []string             `json:"tags,omitempty"`
-	Scale       []string             `json:"scale,omitempty"`
-	Params      map[string]ParamSpec `json:"params,omitempty"`
-	Flows       []FlowSpec           `json:"flows"`
-	Requires    *Requires            `json:"requires,omitempty"`
+	Schema      int      `json:"schema"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	Description string   `json:"description,omitempty"`
+	Readme      string   `json:"readme,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	// FlowTags are stamped on EVERY flow this package installs into
+	// FloMorphic — the operation's own identity as a label. Kept separate from
+	// `Tags`, which are catalog/discovery labels for the package card ("linux",
+	// "exposure"): those describe the package to a human browsing a catalog,
+	// these are a filter a machine applies to a flow list, and conflating them
+	// would put "demo" on the picker's operation filter.
+	FlowTags []string             `json:"flowTags,omitempty"`
+	Scale    []string             `json:"scale,omitempty"`
+	Params   map[string]ParamSpec `json:"params,omitempty"`
+	Flows    []FlowSpec           `json:"flows"`
+	Requires *Requires            `json:"requires,omitempty"`
 	// The document as received, for storage.
 	Raw json.RawMessage `json:"-"`
 }
@@ -135,6 +152,35 @@ func (m *Manifest) Flow(key string) *FlowSpec {
 		}
 	}
 	return nil
+}
+
+// FlowTagsFor is the label set to stamp on one installed flow: the package's
+// `flowTags` plus that flow's own, normalized and de-duplicated.
+//
+// A package that declares neither gets the implicit `operation:<id>` label.
+// Every installed operation is therefore filterable in the run picker whether
+// its author thought about tags or not, and an author who does think about them
+// is never fighting a default they did not write.
+func (m *Manifest) FlowTagsFor(key string) []string {
+	var own []string
+	if f := m.Flow(key); f != nil {
+		own = f.Tags
+	}
+	out := tags.Union(m.FlowTags, own)
+	if len(out) == 0 {
+		return tags.Clean([]string{"operation:" + m.ID})
+	}
+	return out
+}
+
+// AllFlowTags is every label this package stamps on the flows it installs —
+// what the run picker offers as one operation's filter.
+func (m *Manifest) AllFlowTags() []string {
+	lists := make([][]string, 0, len(m.Flows))
+	for _, f := range m.Flows {
+		lists = append(lists, m.FlowTagsFor(f.Key))
+	}
+	return tags.Union(lists...)
 }
 
 // ParseManifest validates the essentials and returns every problem at once.

@@ -854,18 +854,23 @@ func (s *Server) installOperationFlow(c fiber.Ctx) error {
 		return err
 	}
 	key := c.Params("key")
-	_, f, file, err := s.flowFile(op, key)
+	b, f, file, err := s.flowFile(op, key)
 	if err != nil {
 		return err
 	}
+	// Stamp the operation's labels on the flow as it lands, so the "run a flow
+	// on this row" picker can narrow to this operation (see
+	// Manifest.FlowTagsFor — a package that declares none still gets
+	// `operation:<id>`).
+	labels := b.Manifest.FlowTagsFor(key)
 	binds := bindingsOf(op)
 	prev := binds[key]
-	res, err := client.ImportFlow(c.Context(), prev.FlowID, f.Title, file, false)
+	res, err := client.ImportFlow(c.Context(), prev.FlowID, f.Title, labels, file, false)
 	if err != nil {
 		var he *flomorphic.HTTPError
 		if errors.As(err, &he) && he.NotFound() && prev.FlowID != "" {
 			// The bound flow was deleted on FloMorphic — create a fresh one.
-			res, err = client.ImportFlow(c.Context(), "", f.Title, file, false)
+			res, err = client.ImportFlow(c.Context(), "", f.Title, labels, file, false)
 		}
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadGateway, "FloMorphic import: "+err.Error())
@@ -883,6 +888,49 @@ func (s *Server) installOperationFlow(c fiber.Ctx) error {
 	ref := map[string]any{"flowKey": key, "flowId": res.Flow.ID, "problems": res.Problems, "missingActions": res.MissingActions}
 	s.recordChange(c.Context(), subjectOperation, op.ID, actEdit, fmt.Sprintf("%s flow %q into FloMorphic", verb, key), "manual", ref)
 	return s.respondDetail(c, updated)
+}
+
+// POST /api/operations/:id/flows/relabel — stamp this operation's labels on
+// every flow it is bound to, without touching their graphs.
+//
+// Labels are applied when a flow is installed, so two situations leave bound
+// flows unlabelled and therefore invisible to the run picker's operation
+// filter: a package installed before labels existed, and a manifest whose
+// `flowTags` changed after the install. Re-installing each flow would fix it
+// and also discard any edit made on the canvas since — this does only the
+// labelling. It MERGES, so a flow's own labels and another package's survive.
+func (s *Server) relabelOperationFlows(c fiber.Ctx) error {
+	client := s.flo.Get()
+	if client == nil {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "FloMorphic API access is not configured (Settings → FloMorphic)")
+	}
+	op, err := s.getOp(c)
+	if err != nil {
+		return err
+	}
+	b, err := s.loadBundle(op)
+	if err != nil {
+		return err
+	}
+	binds := bindingsOf(op)
+	labelled, failed := 0, map[string]string{}
+	for _, f := range b.Manifest.Flows {
+		bind, ok := binds[f.Key]
+		if !ok || strings.TrimSpace(bind.FlowID) == "" {
+			continue // not installed yet; its install will stamp them
+		}
+		if _, err := client.TagFlow(c.Context(), bind.FlowID, b.Manifest.FlowTagsFor(f.Key), true); err != nil {
+			failed[f.Key] = err.Error()
+			continue
+		}
+		labelled++
+	}
+	if labelled > 0 {
+		s.recordChange(c.Context(), subjectOperation, op.ID, actEdit,
+			fmt.Sprintf("Labelled %d bound flow(s) for the run picker's filter", labelled), "manual",
+			map[string]any{"labels": b.Manifest.AllFlowTags(), "failed": failed})
+	}
+	return c.JSON(fiber.Map{"labelled": labelled, "labels": b.Manifest.AllFlowTags(), "failed": failed})
 }
 
 // PUT /api/operations/:id/flows/:key — bind to an existing FloMorphic flow.
@@ -912,6 +960,15 @@ func (s *Server) linkOperationFlow(c fiber.Ctx) error {
 	flow, err := client.GetFlow(c.Context(), strings.TrimSpace(body.FlowID))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadGateway, "flow: "+err.Error())
+	}
+	// A flow the operator imported in FloMorphic by hand carries none of this
+	// operation's labels, so the picker's operation filter would never find it.
+	// Merge them in — merge, not set, because this flow may already belong to
+	// something else, and the operator's own labels are theirs to keep. A
+	// FloMorphic too old to know the route (or any other failure here) must not
+	// fail the link: the binding is the point, the label is a convenience.
+	if _, err := client.TagFlow(c.Context(), flow.ID, b.Manifest.FlowTagsFor(key), true); err != nil {
+		log.Printf("operations: #%d could not label flow %s: %v", op.ID, flow.ID, err)
 	}
 	binds := bindingsOf(op)
 	binds[key] = binding{FlowID: flow.ID, FlowTitle: flow.Title, InstalledAt: time.Now()}

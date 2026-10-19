@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/Venapce/venapce-api/internal/tags"
 )
 
 // Packing: the reverse of importing. Flows built on the FloMorphic canvas are
@@ -30,21 +32,28 @@ type PackFlow struct {
 	Subject     []string `json:"subject,omitempty"`
 	Schedule    string   `json:"schedule,omitempty"`
 	Writes      []string `json:"writes,omitempty"`
+	// Labels for this one flow, on top of the package's FlowTags.
+	Tags []string `json:"tags,omitempty"`
 }
 
 // PackInput is what the author fills in; everything else is derived.
 type PackInput struct {
-	ID          string               `json:"id"`
-	Name        string               `json:"name"`
-	Version     string               `json:"version"`
-	Description string               `json:"description,omitempty"`
-	Tags        []string             `json:"tags,omitempty"`
-	Scale       []string             `json:"scale,omitempty"`
-	Authors     []string             `json:"authors,omitempty"`
-	License     string               `json:"license,omitempty"`
-	Homepage    string               `json:"homepage,omitempty"`
-	Params      map[string]ParamSpec `json:"params,omitempty"`
-	Flows       []PackFlow           `json:"flows"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	Description string   `json:"description,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	// FlowTags are stamped on every flow the package installs — the operation's
+	// identity as a label, which is what the run picker filters by. Left empty,
+	// the manifest records `operation:<id>` so the package is filterable
+	// anyway (see Manifest.FlowTagsFor).
+	FlowTags []string             `json:"flowTags,omitempty"`
+	Scale    []string             `json:"scale,omitempty"`
+	Authors  []string             `json:"authors,omitempty"`
+	License  string               `json:"license,omitempty"`
+	Homepage string               `json:"homepage,omitempty"`
+	Params   map[string]ParamSpec `json:"params,omitempty"`
+	Flows    []PackFlow           `json:"flows"`
 	// A README written by the author; a scaffold is generated when empty.
 	Readme string `json:"readme,omitempty"`
 	// Extra requirements the exports cannot reveal (settings profiles, other
@@ -133,6 +142,7 @@ func Pack(in PackInput, exports map[string]json.RawMessage) (*Bundle, map[string
 		spec := FlowSpec{
 			Key: key, File: "flows/" + key + ".flow.json", Title: firstNonEmpty(pf.Title, h.Title),
 			Description: pf.Description, Role: role, Step: pf.Step, Subject: pf.Subject, Schedule: pf.Schedule, Writes: pf.Writes,
+			Tags: tags.Clean(pf.Tags),
 		}
 		if spec.Step == 0 {
 			spec.Step = i + 1
@@ -222,6 +232,17 @@ func Pack(in PackInput, exports map[string]json.RawMessage) (*Bundle, map[string
 	if len(in.Tags) > 0 {
 		manifest["tags"] = in.Tags
 	}
+	// Default the operation's flow label to its own id when the author named
+	// none, and write it down rather than leaving it implicit: the manifest is
+	// what the operator reads and what another install re-packs from, so the
+	// label the picker filters by should be visible in the file.
+	flowTags := tags.Clean(in.FlowTags)
+	if len(flowTags) == 0 {
+		flowTags = tags.Clean([]string{"operation:" + in.ID})
+	}
+	if len(flowTags) > 0 {
+		manifest["flowTags"] = flowTags
+	}
 	if len(in.Scale) > 0 {
 		manifest["scale"] = in.Scale
 	}
@@ -283,6 +304,11 @@ func readmeScaffold(m *Manifest) string {
 		}
 		if len(f.Writes) > 0 {
 			facts = append(facts, "writes "+strings.Join(f.Writes, ", "))
+		}
+		// The labels the flow is installed with: what an operator types into
+		// the run picker's filter to find it again.
+		if labels := m.FlowTagsFor(f.Key); len(labels) > 0 {
+			facts = append(facts, "labelled `"+strings.Join(labels, "`, `")+"`")
 		}
 		if len(facts) > 0 {
 			b.WriteString(strings.Join(facts, " · ") + "\n")
