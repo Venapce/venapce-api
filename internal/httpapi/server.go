@@ -25,11 +25,15 @@ import (
 )
 
 type Server struct {
-	q   *db.Queries
-	box *cryptobox.Box
-	sup *superset.Manager
-	osc *osctrl.Manager
-	plg *plugin.Manager
+	q *db.Queries
+	// pool is the same connection pool `q` reads through, kept for the
+	// handlers that need a TRANSACTION of their own — the preferences import,
+	// which has to apply a whole file or none of it.
+	pool *pgxpool.Pool
+	box  *cryptobox.Box
+	sup  *superset.Manager
+	osc  *osctrl.Manager
+	plg  *plugin.Manager
 	// FloMorphic access (API base + shared secret + infra host), seeded from env
 	// and replaceable at runtime from Settings. Holds the live client, which is nil
 	// while that access is incomplete.
@@ -40,11 +44,12 @@ type Server struct {
 func New(pool *pgxpool.Pool, box *cryptobox.Box, cfg config.Config) *Server {
 	osc := osctrl.NewManager()
 	return &Server{
-		q:   db.New(pool),
-		box: box,
-		sup: superset.NewManager(),
-		osc: osc,
-		plg: plugin.NewManager(pool, osc),
+		q:    db.New(pool),
+		pool: pool,
+		box:  box,
+		sup:  superset.NewManager(),
+		osc:  osc,
+		plg:  plugin.NewManager(pool, osc),
 		flo: flomorphic.NewManager(flomorphic.Access{
 			URL:       cfg.FlomorphicURL,
 			JWTSecret: cfg.FlomorphicJWTSecret,
@@ -90,6 +95,13 @@ func (s *Server) App() *fiber.App {
 	// On-demand demo data: load Superset's example datasets from the UI.
 	api.Get("/settings/superset/examples/status", s.getExamplesStatus)
 	api.Post("/settings/superset/examples", s.loadExamples)
+
+	// Preferences in and out: the configuration an operator builds — the
+	// charts, the dashboards they sit on and the saved views — as one JSON
+	// file, so a second install starts where this one got to. No pipeline rows,
+	// no secrets (see preferences.go on what is deliberately left out).
+	api.Get("/settings/preferences", s.exportPreferences)
+	api.Post("/settings/preferences/import", s.importPreferences)
 
 	// Server-side Superset data proxy (token stays here, never in the browser).
 	sup := api.Group("/superset")
@@ -178,6 +190,10 @@ func (s *Server) App() *fiber.App {
 	// The run picker's operation filter: which operations are installed and
 	// what labels each stamped on its flows.
 	api.Get("/flows/tags", s.flowTags)
+	// The input one flow asks for before it runs, resolved for a launch — what
+	// the run dialog renders as a form instead of asking an operator to know
+	// the shape and type it as JSON.
+	api.Get("/flows/:id/entry", s.flowEntry)
 	api.Get("/activities", s.listActivities)
 	api.Get("/activities/tags", s.activityTags)
 	api.Post("/activities", s.createActivity)

@@ -29,6 +29,25 @@ type MissingAction struct {
 	Nodes  []string `json:"nodes"`
 }
 
+// UnboundNode is one plugin node the import kept but did not bind, because
+// binding it would have been a guess: several plugins registered on the
+// FloMorphic serve its action and the document named none of them.
+//
+// Not a missing plugin — the action is served, more than once over — so it
+// arrives apart from MissingActions, whose message is "install this plugin".
+// The node lands flagged on the canvas and the pick is made in its drawer,
+// against the plugins named in Choices.
+type UnboundNode struct {
+	Ref     string   `json:"ref"`
+	Title   string   `json:"title,omitempty"`
+	Action  string   `json:"action"`
+	Plugin  string   `json:"plugin,omitempty"`
+	Choices []string `json:"choices"`
+	// Withheld marks a node the document itself asked to leave unbound, rather
+	// than one FloMorphic held back on finding the action ambiguous.
+	Withheld bool `json:"withheld,omitempty"`
+}
+
 // ImportProblem is a design problem the planner reported (error = the node or
 // edge was dropped, warn = kept as-is).
 type ImportProblem struct {
@@ -43,6 +62,7 @@ type ImportResult struct {
 	Flow           Flow            `json:"flow"`
 	Problems       []ImportProblem `json:"problems"`
 	MissingActions []MissingAction `json:"missingActions"`
+	UnboundNodes   []UnboundNode   `json:"unboundNodes"`
 	CompileError   string          `json:"compileError"`
 	DryRun         bool            `json:"dryRun"`
 }
@@ -80,6 +100,9 @@ func (c *Client) ImportFlow(ctx context.Context, id, title string, tags []string
 	}
 	if res.MissingActions == nil {
 		res.MissingActions = []MissingAction{}
+	}
+	if res.UnboundNodes == nil {
+		res.UnboundNodes = []UnboundNode{}
 	}
 	return &res, nil
 }

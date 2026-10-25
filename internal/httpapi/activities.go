@@ -140,6 +140,149 @@ func (s *Server) flowTags(c fiber.Ctx) error {
 	return c.JSON(out)
 }
 
+// GET /api/flows/:id/entry — the entry form one flow declares, resolved for a
+// launch: the form itself, the context path its answers land at, and the values
+// the fields should start at.
+//
+// A flow designer can declare the input a flow needs (FloMorphic's
+// `preferences.entry`) instead of wiring a node that seeds the context by hand.
+// This is what the run dialog renders in place of the raw-JSON box an operator
+// used to have to know the shape for, and `entry: null` is the answer for a
+// flow that asks for nothing — a picker's cue to run it the way it always did,
+// not an error.
+//
+// The resolve is FloMorphic's and is proxied rather than recomputed: the
+// dialog, an agent over MCP and the designer's own run button have to start the
+// fields in the same place. No contextId travels with it because the run's
+// context document does not exist until the launch (see startRun), so a `live`
+// prefill resolves to the form's defaults.
+//
+// `last` is this app's own addition: what the previous run of this flow was
+// actually given (see lastEntryRun). FloMorphic's `live` prefill cannot answer
+// that here — it reads the context the run will go against, and venapce builds
+// a fresh one per run — so the previous answers would otherwise be lost to the
+// operator even though the engine kept them. `subjectKind` / `subjectId` narrow
+// it to one row's own history first, which is the re-run case.
+func (s *Server) flowEntry(c fiber.Ctx) error {
+	client := s.flo.Get()
+	if client == nil {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "FloMorphic API access is not configured (Settings → FloMorphic)")
+	}
+	view, err := client.FlowEntry(c.Context(), c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadGateway, "flow entry: "+err.Error())
+	}
+	res := flowEntryResponse{EntryView: view}
+	// Only worth looking for a flow that asks for something: a flow with no
+	// form has no values to have been given.
+	if view.Entry != nil {
+		subjectID, _ := strconv.ParseInt(c.Query("subjectId"), 10, 64)
+		res.Last = s.lastEntryRun(c.Context(), client, c.Params("id"), c.Query("subjectKind"), subjectID)
+	}
+	return c.JSON(res)
+}
+
+// flowEntryResponse is GET /api/flows/:id/entry: FloMorphic's resolved view,
+// plus what the last run of the flow was given. The view is embedded so its
+// fields stay at the top level — a client reads `entry` / `values` / `target`
+// exactly as FloMorphic names them.
+type flowEntryResponse struct {
+	flomorphic.EntryView
+	Last *lastEntryValues `json:"last,omitempty"`
+}
+
+// lastEntryValues is what one earlier run of a flow was launched with, and
+// enough about that run for an operator to decide whether they want it back.
+type lastEntryValues struct {
+	Values     map[string]any `json:"values"`
+	ActivityID int64          `json:"activityId"`
+	Title      string         `json:"title,omitempty"`
+	// At is when that run started — what a launcher dates the offer by.
+	At *time.Time `json:"at,omitempty"`
+	// The row it ran on, and whether that is the row being launched now: values
+	// borrowed from another row are still useful, but not the same offer.
+	SubjectKind string `json:"subjectKind,omitempty"`
+	SubjectID   int64  `json:"subjectId,omitempty"`
+	SameSubject bool   `json:"sameSubject"`
+}
+
+// entryProbeRuns bounds how far back a lookup walks. The newest run of a flow
+// normally has what we want on it; the budget exists because each candidate
+// costs one FloMorphic round trip, and a dialog opening is not the place to
+// spend ten of them hunting for an answer that is plainly not there.
+const entryProbeRuns = 5
+
+// lastEntryRun finds the values the most recent run of this flow was given.
+//
+// The engine keeps them on the process row (`meta.entry`) precisely so they
+// survive the context moving on — that is the record of what a run was actually
+// launched with, and it is read from there rather than from the run's final
+// context document, where a later node may have overwritten the seed or the
+// flow may have replaced `data` wholesale.
+//
+// This row's own history is searched first and any row's second: re-running a
+// flow on the row you are looking at usually means "the same answers as last
+// time", while the first run on a new row still benefits from what the previous
+// one was given. Nothing here is load-bearing — every failure returns nil and
+// the dialog simply does not make the offer.
+func (s *Server) lastEntryRun(ctx context.Context, client *flomorphic.Client, flowID, subjectKind string, subjectID int64) *lastEntryValues {
+	if strings.TrimSpace(flowID) == "" {
+		return nil
+	}
+	scoped := subjectKind != "" && subjectID != 0
+	if scoped {
+		if found := s.probeEntryRuns(ctx, client, flowID, subjectKind, subjectID); found != nil {
+			found.SameSubject = true
+			return found
+		}
+	}
+	return s.probeEntryRuns(ctx, client, flowID, "", 0)
+}
+
+// probeEntryRuns walks this flow's runs newest-first and returns the first one
+// FloMorphic still holds entry values for.
+func (s *Server) probeEntryRuns(ctx context.Context, client *flomorphic.Client, flowID, subjectKind string, subjectID int64) *lastEntryValues {
+	rows, err := s.q.ListActivities(ctx, db.ListActivitiesParams{
+		SubjectKind: subjectKind,
+		SubjectID:   subjectID,
+		Kind:        actRun,
+		FlowID:      flowID,
+		Tags:        []string{},
+		Lim:         entryProbeRuns,
+	})
+	if err != nil {
+		log.Printf("flows: last entry values for %s: %v", flowID, err)
+		return nil
+	}
+	for _, a := range rows {
+		if a.ProcessID == 0 {
+			// A run that never reached the engine was never given anything.
+			continue
+		}
+		proc, err := client.GetProcess(ctx, a.ProcessID)
+		if err != nil || proc == nil {
+			continue
+		}
+		values, ok := proc.Meta[flomorphic.MetaEntryKey].(map[string]any)
+		if !ok || len(values) == 0 {
+			continue
+		}
+		at := a.StartedAt
+		if at == nil {
+			at = &a.CreatedAt
+		}
+		return &lastEntryValues{
+			Values:      values,
+			ActivityID:  a.ID,
+			Title:       a.Title,
+			At:          at,
+			SubjectKind: a.SubjectKind,
+			SubjectID:   a.SubjectID,
+		}
+	}
+	return nil
+}
+
 // ---- HTTP: activities ----
 
 // GET /api/activities?subjectKind=&subjectId=&kind=&status=&flowId=&tags=&match=&search=&limit=
@@ -409,6 +552,21 @@ type runFlowBody struct {
 	Title string `json:"title"`
 	// Optional extra input handed to the flow as $.input.
 	Input json.RawMessage `json:"input"`
+	// Entry are the values filled into the flow's own entry form — the input
+	// the flow declares it needs (GET /api/flows/:id/entry). They are not part
+	// of the context document venapce builds: FloMorphic validates them
+	// against the flow's schema and seeds them at the one path the entry names
+	// (`$._entry` by default), so a flow reads its form answers where its
+	// designer said they would be. One form, N subjects — every run of this
+	// call is seeded with the same values.
+	//
+	// `input` is the older, untyped sibling: venapce's own extra input at
+	// `$.input`, with nothing declaring the slot and nothing checking what
+	// lands in it. It stays on the wire — an operation's entry run builds its
+	// manifest params there, and an API caller may still use it — but the run
+	// dialog no longer offers it to an operator: a flow that states what it
+	// needs is asked for exactly that.
+	Entry map[string]any `json:"entry"`
 }
 
 // POST /api/activities/run — send one or more rows through a FloMorphic flow.
@@ -454,7 +612,7 @@ func (s *Server) runFlow(c fiber.Ctx) error {
 	out := make([]db.Activity, 0, len(subjects))
 	var firstErr error
 	for _, sub := range subjects {
-		a, err := s.startRun(c.Context(), client, flow, sub, body.Title, body.Input)
+		a, err := s.startRun(c.Context(), client, flow, sub, body.Title, body.Input, body.Entry)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -479,7 +637,15 @@ func (s *Server) runFlow(c fiber.Ctx) error {
 // document), then creates the document and launches the process, and finally
 // writes the run's identity back onto the activity. A launch failure leaves a
 // `failed` activity with the error, so the attempt itself is in the history.
-func (s *Server) startRun(ctx context.Context, client *flomorphic.Client, flow flomorphic.Flow, sub subjectRef, title string, input json.RawMessage) (*db.Activity, error) {
+//
+// entry are the answers to the flow's own entry form, handed to the engine with
+// the launch rather than written into the document here: FloMorphic validates
+// them against the flow's schema and seeds them at the path the entry declares.
+// nil is "nothing supplied", which is what a flow with no entry form gets and
+// what makes an optional form fall back to its defaults; a flow whose entry is
+// required refuses the launch, and that refusal lands on the activity like any
+// other start failure.
+func (s *Server) startRun(ctx context.Context, client *flomorphic.Client, flow flomorphic.Flow, sub subjectRef, title string, input json.RawMessage, entry map[string]any) (*db.Activity, error) {
 	row, err := s.loadSubject(ctx, sub.Kind, sub.ID)
 	if err != nil {
 		return nil, fmt.Errorf("%s #%d: %w", sub.Kind, sub.ID, err)
@@ -506,10 +672,7 @@ func (s *Server) startRun(ctx context.Context, client *flomorphic.Client, flow f
 		return nil, err
 	}
 
-	doc, err := s.contextFor(ctx, a, row, input)
-	if err != nil {
-		return s.failRun(ctx, a, "", "", 0, err)
-	}
+	doc := contextFor(a, row, input)
 	ctxTitle := fmt.Sprintf("venapce %s #%d · %s", sub.Kind, sub.ID, flow.Title)
 	contextID, err := client.CreateContext(ctx, ctxTitle, doc)
 	if err != nil {
@@ -517,7 +680,7 @@ func (s *Server) startRun(ctx context.Context, client *flomorphic.Client, flow f
 	}
 	proc, err := client.StartProcess(ctx, flow.ID, contextID, map[string]any{
 		"venapce": map[string]any{"activityId": a.ID, "subjectKind": sub.Kind, "subjectId": sub.ID},
-	})
+	}, entry)
 	if err != nil {
 		pid, idx := "", int64(0)
 		if proc != nil {
@@ -561,43 +724,31 @@ func (s *Server) failRun(ctx context.Context, a db.Activity, contextID, pid stri
 //	subject   {kind, id}                 which row this is
 //	row       {…}                        the row itself (data / meta / ref / tags …)
 //	activity  {id, flowId, flowTitle}    this run's record (db.activities.update id)
-//	history   [{…}]                      earlier finished activities on the row,
-//	                                     newest first (so runs can build on runs)
 //	input     any                        extra input given at launch, if any
 //	outcome   {}                         where the flow leaves its conclusion:
 //	                                     title, description, remediation, proof,
 //	                                     facts [{k,v}] | {k:v}, tags, data, meta
-func (s *Server) contextFor(ctx context.Context, a db.Activity, row map[string]any, input json.RawMessage) (map[string]any, error) {
-	prior, err := s.q.ListActivitiesBySubject(ctx, db.ListActivitiesBySubjectParams{SubjectKind: a.SubjectKind, SubjectID: a.SubjectID})
-	if err != nil {
-		return nil, err
-	}
-	history := make([]map[string]any, 0, len(prior))
-	for _, p := range prior {
-		if p.ID == a.ID || flomorphic.ProcessOpen(p.Status) {
-			continue
-		}
-		history = append(history, map[string]any{
-			"id": p.ID, "kind": p.Kind, "status": p.Status, "title": p.Title,
-			"description": p.Description, "remediation": p.Remediation, "proof": p.Proof,
-			"facts": p.Facts, "tags": p.Tags, "origin": p.Origin, "flowId": p.FlowID,
-			"flowTitle": p.FlowTitle, "finishedAt": p.FinishedAt, "data": p.Data,
-		})
-		if len(history) >= 25 {
-			break
-		}
-	}
+//
+// The row's earlier activities are deliberately NOT in it. They used to ride
+// along as `history` — the last 25 finished ones, each with its own prose,
+// facts and `data` document — on the theory that a run could build on earlier
+// runs. The cost is not theoretical: a row a dozen runs old carries more
+// history than row, and every byte of it is published into the engine, held in
+// the process's context for the length of the run and read back at the end, for
+// data no node asked for. A flow that does want the row's past can read it —
+// GET /api/activities?subjectKind=…&subjectId=… — which is a call the flows
+// that need it make and the ones that do not no longer pay for.
+func contextFor(a db.Activity, row map[string]any, input json.RawMessage) map[string]any {
 	doc := map[string]any{
 		"subject":  map[string]any{"kind": a.SubjectKind, "id": a.SubjectID},
 		"row":      row,
 		"activity": map[string]any{"id": a.ID, "flowId": a.FlowID, "flowTitle": a.FlowTitle},
-		"history":  history,
 		"outcome":  map[string]any{},
 	}
 	if len(input) > 0 {
 		doc["input"] = json.RawMessage(input)
 	}
-	return doc, nil
+	return doc
 }
 
 // ---- syncing a run with FloMorphic ----
@@ -702,8 +853,10 @@ func activityErrors(raw json.RawMessage) *flomorphic.RunErrors {
 
 // liftOutcome maps the run's final context document onto the activity: the
 // `outcome` object's known keys become columns, and the document (minus the
-// input the run started with — the row and history venapce already holds) is
-// kept whole in `data`. A key the flow did not set leaves the column as it is,
+// input the run started with, which venapce already holds) is kept whole in
+// `data`. `history` is still trimmed although runs no longer carry one: a run
+// launched before it went can still be in flight across a deploy. A key the
+// flow did not set leaves the column as it is,
 // so a flow that wrote the columns itself through db.activities.update is not
 // overwritten with blanks.
 func liftOutcome(a *db.Activity, doc map[string]any) {

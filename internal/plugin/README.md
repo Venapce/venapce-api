@@ -37,11 +37,15 @@ all, **flow runs**. When an operator sends a row through a flow (venapce
   "subject":  { "kind": "stage", "id": 21 },
   "row":      { "...the row: title, tags, data, meta, ref..." },
   "activity": { "id": 4, "flowId": "flow_…", "flowTitle": "…" },
-  "history":  [ { "id": 3, "kind": "run", "title": "…", "facts": [], "…": "earlier finished activities, newest first" } ],
   "input":    "optional extra input given at launch",
   "outcome":  {}
 }
 ```
+
+The row's earlier activities are not in the document: a flow that wants the
+row's past reads it from the API
+(`GET /api/activities?subjectKind=stage&subjectId=21`) rather than having every
+run carry a copy of it.
 
 The flow reads the row through `{{$.row.…}}` tokens (its author keeps the flow's
 expectations and the row's data model in step) and leaves its conclusion in
@@ -54,7 +58,7 @@ expectations and the row's data model in step) and leaves its conclusion in
 | `proof` | the evidence (text, or any JSON — kept compact) |
 | `facts` | `[{"k":"severity","v":"low"}, …]` or `{"severity":"low"}` — typed key/values the front identifies and renders |
 | `tags` | labels for the activity |
-| `data` | the output document to keep (default: the whole final context minus `row`/`history`) |
+| `data` | the output document to keep (default: the whole final context minus the launch input — `row`, `subject`, `activity`) |
 | `meta` | any enrichment |
 
 When the process ends, venapce reads the context back and lifts `outcome` into

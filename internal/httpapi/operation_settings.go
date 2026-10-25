@@ -383,6 +383,11 @@ func buildSettingsPlan(b *operations.Bundle, f settingsFacts) settingsPlan {
 	for _, name := range groupOrder {
 		g := groups[name]
 		p := g.need
+		// A builtin kind is grouped with no action name at all; the field is
+		// listed, so it travels as [] rather than null.
+		if p.Actions == nil {
+			p.Actions = []string{}
+		}
 		switch {
 		case !f.known:
 			p.Status = settingsUnknown

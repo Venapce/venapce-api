@@ -42,6 +42,8 @@ internal/httpapi             Fiber server + handlers (settings, superset proxy, 
 | `POST /api/superset/chart/data` | proxy: send a `query_context`, get computed rows |
 | `GET/POST /api/charts`, `GET/PUT/DELETE /api/charts/:id` | native saved charts |
 | `GET/POST /api/dashboards`, `GET/PUT/DELETE /api/dashboards/:id` | native dashboards (title + grid `layout`) |
+| `GET /api/settings/preferences?include=` | export this install's configuration as one JSON file |
+| `POST /api/settings/preferences/import` | apply a preferences file (`dryRun` to see the outcome first) |
 
 ### The native dashboard model
 
@@ -54,6 +56,25 @@ writes — an array of cells referencing saved charts by id:
 
 Each `chart` carries its `query_context` (what to ask Superset) and `builder_state`
 (so the front can reopen it for editing).
+
+### Preferences in and out
+
+The configuration an operator *builds* — the saved charts, the dashboards they
+sit on and the saved views — travels between installs as one JSON file, so a
+demo install's work becomes the starting point of the real one.
+
+Pipeline rows (stage, findings, issues, activities) are deliberately **not** in
+it, nor are the Superset / osctrl / FloMorphic credentials (encrypted per
+appliance, and unreadable by the next install). That is what keeps the file safe
+to mail, to commit and to diff; see the header comment in
+`internal/httpapi/preferences.go` for the full reasoning and the identity each
+section is matched on (a view's name+table, a chart's title, a dashboard's
+slug …).
+
+An import is one transaction and never deletes anything: `mode: "merge"` lets
+the file update what is already here, `mode: "add"` leaves it alone, and
+`dryRun: true` applies the whole file and rolls it back so the report the panel
+shows is the real one.
 
 ## Run locally
 

@@ -41,6 +41,12 @@ type binding struct {
 	// Problems / missing actions from the last install, for the flow row.
 	MissingActions []flomorphic.MissingAction `json:"missingActions,omitempty"`
 	CompileError   string                     `json:"compileError,omitempty"`
+	// UnboundNodes are the plugin nodes FloMorphic kept but would not bind,
+	// because more than one of its plugins serves their action — the flow is
+	// installed, and those nodes are waiting for a pick on its canvas. Reported
+	// by the import and stored with the binding, so the flow row can say so
+	// without re-reading the graph.
+	UnboundNodes []flomorphic.UnboundNode `json:"unboundNodes,omitempty"`
 }
 
 type readinessCheck struct {
@@ -89,6 +95,7 @@ type flowState struct {
 	InstalledAt    *time.Time                 `json:"installedAt,omitempty"`
 	MissingActions []flomorphic.MissingAction `json:"missingActions,omitempty"`
 	CompileError   string                     `json:"compileError,omitempty"`
+	UnboundNodes   []flomorphic.UnboundNode   `json:"unboundNodes,omitempty"`
 	LastRun        *lastRun                   `json:"lastRun,omitempty"`
 }
 
@@ -389,6 +396,30 @@ func (s *Server) computeReadiness(b *operations.Bundle, values map[string]json.R
 					names = append(names, ma.Action)
 				}
 				c.Detail = "Installed, but its nodes call actions no plugin provides: " + strings.Join(names, ", ") + " — re-install after installing the plugin"
+			} else if len(bnd.UnboundNodes) > 0 {
+				// Installed and complete, but unbound in places: FloMorphic
+				// found several of its plugins serving these nodes' action and
+				// would not choose, so the pick is waiting on its canvas.
+				//
+				// Reported, not failed. The pick is made in FloMorphic and
+				// cannot be seen from here — a flow export carries no plugin
+				// ids, they are per-install — so this is the state as of the
+				// last install and nothing would ever clear it. Failing on it
+				// would leave the operation permanently unready, and the only
+				// way to refresh the snapshot is a re-install, which pushes the
+				// file again and takes the pick back out. So it says what is
+				// waiting and leaves the operation runnable; a run of a node
+				// still unbound errors on that node and says so.
+				c.Status = "unknown"
+				var refs []string
+				for _, u := range bnd.UnboundNodes {
+					label := u.Ref
+					if label == "" {
+						label = u.Action
+					}
+					refs = append(refs, label)
+				}
+				c.Detail = fmt.Sprintf("Installed, but %d node(s) call an action more than one plugin on FloMorphic provides (%s) — open the flow and pick the plugin on each. Checked at install: a pick made since is not visible here.", len(bnd.UnboundNodes), strings.Join(refs, ", "))
 			}
 		} else {
 			c.Status = "missing"
@@ -479,6 +510,7 @@ func (s *Server) detail(ctx context.Context, op db.Operation) (*operationDetail,
 			t := bnd.InstalledAt
 			st.FlowID, st.FlowTitle, st.InstalledAt = bnd.FlowID, bnd.FlowTitle, &t
 			st.MissingActions, st.CompileError = bnd.MissingActions, bnd.CompileError
+			st.UnboundNodes = bnd.UnboundNodes
 			st.LastRun = lastByFlow[bnd.FlowID]
 		}
 		if f.Doc != "" {
@@ -876,7 +908,11 @@ func (s *Server) installOperationFlow(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusBadGateway, "FloMorphic import: "+err.Error())
 		}
 	}
-	binds[key] = binding{FlowID: res.Flow.ID, FlowTitle: res.Flow.Title, InstalledAt: time.Now(), MissingActions: res.MissingActions, CompileError: res.CompileError}
+	// Nodes FloMorphic would not bind come back from the import itself: it holds
+	// back any action several of its plugins serve rather than bind the first
+	// that answers (flowfile.stampIdentities), so this records the pick that is
+	// waiting instead of detecting the ambiguity a second time here.
+	binds[key] = binding{FlowID: res.Flow.ID, FlowTitle: res.Flow.Title, InstalledAt: time.Now(), MissingActions: res.MissingActions, UnboundNodes: res.UnboundNodes, CompileError: res.CompileError}
 	updated, err := s.saveBindings(c.Context(), op, binds)
 	if err != nil {
 		return err
@@ -885,7 +921,7 @@ func (s *Server) installOperationFlow(c fiber.Ctx) error {
 	if prev.FlowID != "" {
 		verb = "Re-installed"
 	}
-	ref := map[string]any{"flowKey": key, "flowId": res.Flow.ID, "problems": res.Problems, "missingActions": res.MissingActions}
+	ref := map[string]any{"flowKey": key, "flowId": res.Flow.ID, "problems": res.Problems, "missingActions": res.MissingActions, "unboundNodes": res.UnboundNodes}
 	s.recordChange(c.Context(), subjectOperation, op.ID, actEdit, fmt.Sprintf("%s flow %q into FloMorphic", verb, key), "manual", ref)
 	return s.respondDetail(c, updated)
 }
@@ -981,9 +1017,16 @@ func (s *Server) linkOperationFlow(c fiber.Ctx) error {
 	return s.respondDetail(c, updated)
 }
 
-// POST /api/operations/:id/run {flowKey, input?} — start an entry flow. The
-// run is an activity on the operation; the flow gets the params as
+// POST /api/operations/:id/run {flowKey, input?, entry?} — start an entry flow.
+// The run is an activity on the operation; the flow gets the params as
 // $.input.params (plus anything sent as input).
+//
+// `entry` is the answers to the flow's own entry form, if it declares one (see
+// GET /api/flows/:id/entry): FloMorphic validates them against the flow's
+// schema and seeds them at the path the entry names, which is a different slot
+// from `$.input` and a different contract. Omitted, an optional form falls back
+// to its declared defaults — which is what every operation run did before
+// flows could ask for input.
 func (s *Server) runOperation(c fiber.Ctx) error {
 	client := s.flo.Get()
 	if client == nil {
@@ -996,6 +1039,7 @@ func (s *Server) runOperation(c fiber.Ctx) error {
 	var body struct {
 		FlowKey string          `json:"flowKey"`
 		Input   json.RawMessage `json:"input"`
+		Entry   map[string]any  `json:"entry"`
 	}
 	if err := c.Bind().Body(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
@@ -1029,7 +1073,7 @@ func (s *Server) runOperation(c fiber.Ctx) error {
 			input[k] = v
 		}
 	}
-	a, err := s.startRun(c.Context(), client, flow, subjectRef{Kind: subjectOperation, ID: op.ID}, f.Title, mustJSON(input))
+	a, err := s.startRun(c.Context(), client, flow, subjectRef{Kind: subjectOperation, ID: op.ID}, f.Title, mustJSON(input), body.Entry)
 	if err != nil {
 		if a == nil {
 			return fiber.NewError(fiber.StatusBadGateway, err.Error())

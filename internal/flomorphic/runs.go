@@ -24,12 +24,22 @@ import (
 // flows it installs, and what the run picker narrows by so an operator sees the
 // handful their operation brought instead of every flow on the canvas.
 type Flow struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Tags      []string `json:"tags"`
-	CreatedAt int64    `json:"createdAt"`
-	UpdatedAt int64    `json:"updatedAt"`
+	ID    string   `json:"id"`
+	Title string   `json:"title"`
+	Tags  []string `json:"tags"`
+	// Preferences are the flow's non-graph choices — today the entry form it
+	// asks to have filled in before it runs (see entry.go). Carried on the
+	// list so the run picker can mark the flows that ask for input without a
+	// round trip per row; the form's starting values still come from
+	// FlowEntry, which is the one thing that resolves them.
+	Preferences *FlowPreferences `json:"preferences,omitempty"`
+	CreatedAt   int64            `json:"createdAt"`
+	UpdatedAt   int64            `json:"updatedAt"`
 }
+
+// Entry is the form this flow asks to have filled in, or nil when it asks for
+// nothing — the picker's "does this flow need input" test.
+func (f Flow) Entry() *EntryForm { return f.Preferences.EntryOrNil() }
 
 // page is FloMorphic's page envelope: { list, total, page, per_page, total_pages }.
 type page[T any] struct {
@@ -197,8 +207,19 @@ type Process struct {
 // the recorded process. meta is venapce's record meta on the run (how the run
 // can be traced back to its activity from the FloMorphic side). A launch that
 // FloMorphic recorded as failed still returns the row alongside the error.
-func (c *Client) StartProcess(ctx context.Context, flowID, contextID string, meta map[string]any) (*Process, error) {
+//
+// entry are the values filled into the flow's entry form (see entry.go), or nil
+// when the flow declares none — or when nothing was supplied for an optional
+// one, which FloMorphic answers by seeding the form's defaults. The values are
+// validated against the flow's own schema and seeded into the context before
+// the run is dispatched, so a launch that does not satisfy the flow's input
+// contract fails here with the engine's own message rather than halfway through
+// the graph.
+func (c *Client) StartProcess(ctx context.Context, flowID, contextID string, meta, entry map[string]any) (*Process, error) {
 	body := map[string]any{"flowId": flowID, "contextId": contextID, "meta": meta}
+	if len(entry) > 0 {
+		body["entry"] = entry
+	}
 	data, err := c.do(ctx, http.MethodPost, "/process", body)
 	if err != nil {
 		return nil, err
