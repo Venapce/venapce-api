@@ -22,8 +22,13 @@ import (
 )
 
 // maxResponseBytes caps how much of one FloMorphic response is read. It is a
-// guard against a runaway body, not a page size: the flow list legitimately
-// runs to several megabytes.
+// guard against a runaway body, not a page size.
+//
+// It was sized for a flow list that answered whole rows — every flow's
+// view_flow graph, tens of KB each, so a page ran to megabytes. GET /flow now
+// answers summaries (no graph; FloMorphic's models.FlowSummary), so a page is
+// tens of KB. The ceiling stays where it is for the bodies that still can be
+// large — one flow read whole, a flow export, a run's results.
 const maxResponseBytes = 32 << 20
 
 type Client struct {
@@ -97,12 +102,12 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 	}
 	defer resp.Body.Close()
 
-	// Read with room to spare but a hard ceiling: FloMorphic's list routes
-	// answer with whole rows, and a flow row carries its view_flow graph (tens
-	// of KB each), so a full flow list runs to megabytes. Reading one byte past
-	// the cap is what tells a body that is merely large from one that was cut —
-	// without it an over-cap body silently became truncated JSON and surfaced
-	// as a bogus "invalid FloMorphic response" parse error.
+	// Read with room to spare but a hard ceiling. Reading one byte past the cap
+	// is what tells a body that is merely large from one that was cut — without
+	// it an over-cap body silently became truncated JSON and surfaced as a
+	// bogus "invalid FloMorphic response" parse error. What can legitimately be
+	// large is a single flow, an export or a run's results; the flow list
+	// answers summaries.
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, err
