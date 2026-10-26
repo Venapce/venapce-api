@@ -14,6 +14,18 @@ import (
 // (:8022) is derived from the same host on the venapce side (see deriveInfraBase).
 const infraNatsPort = "4222"
 
+// DefaultFlomorphicPanelURL is where the FloMorphic web app answers for a stock
+// single-host Docker install: the port FloMorphic's compose publishes on the
+// Docker host (8088 — the canvas, which is why the venapce stack moves Superset
+// off that port). It is the default for FLOMORPHIC_PANEL_URL so venapce's "open
+// in FloMorphic" links work out of the box, before anyone has been to Settings.
+//
+// Only a starting point: a browser that is not on the Docker host, or an install
+// behind a reverse proxy, reaches FloMorphic somewhere else, and Settings →
+// FloMorphic web app is where that is said. The front carries the same literal
+// in DEFAULT_PANEL_URL (venapce-wapp/src/lib/flomorphicLinks.ts).
+const DefaultFlomorphicPanelURL = "http://localhost:8088"
+
 // Config is the process configuration, all sourced from the environment so the
 // same binary runs in the deploy compose (DATABASE_URL=...@postgres:5432/venapce)
 // and locally.
@@ -31,11 +43,17 @@ type Config struct {
 	FlomorphicURL       string
 	FlomorphicJWTSecret string
 
-	// FlomorphicPanelURL is where the FloMorphic web panel answers — not an API
+	// FlomorphicPanelURL is where the FloMorphic web app answers — not an API
 	// venapce calls, but the address its own pages link a flow, a run or a
 	// context document to, so an operator reading an outcome here can open the
-	// flow that produced it there. Empty disables those links (the panel may not
-	// be reachable from the operator's browser at all).
+	// flow that produced it there.
+	//
+	// It is a BROWSER-side address and so almost never FlomorphicURL above: every
+	// service runs in a container, where FloMorphic is its container name on the
+	// compose network, while the operator's browser reaches the port FloMorphic's
+	// compose publishes on the Docker host. Neither follows from the other, which
+	// is why this is its own setting with its own card in Settings; env is only
+	// its default (DefaultFlomorphicPanelURL when unset).
 	FlomorphicPanelURL string
 
 	// InfraHost is the hostname of the infra service. In the deploy compose it is
@@ -135,7 +153,7 @@ func Load() Config {
 
 		FlomorphicURL:       strings.TrimRight(env("FLOMORPHIC_URL", ""), "/"),
 		FlomorphicJWTSecret: env("FLOMORPHIC_JWT_SECRET", ""),
-		FlomorphicPanelURL:  strings.TrimRight(env("FLOMORPHIC_PANEL_URL", ""), "/"),
+		FlomorphicPanelURL:  strings.TrimRight(env("FLOMORPHIC_PANEL_URL", DefaultFlomorphicPanelURL), "/"),
 
 		InfraHost: env("INFRA_HOST", "infra"),
 

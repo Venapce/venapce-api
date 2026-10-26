@@ -30,18 +30,21 @@ type flomorphicAPIConfig struct {
 	URL          string `json:"url,omitempty"`
 	JWTSecretEnc string `json:"jwt_secret_enc,omitempty"`
 	InfraHost    string `json:"infra_host,omitempty"`
-	// PanelURL is where the FloMorphic web panel answers — what venapce's pages
-	// link a flow or a run to. It is a browser-side address, so it is often not
-	// the API base at all (a reverse proxy, a different host name) and the
-	// operator is the only one who knows it.
+	// PanelURL is where the FloMorphic web app answers in a browser. It is no
+	// longer written here — it has its own setting and its own Settings card (see
+	// flomorphic_panel.go), because it addresses a different client than the rest
+	// of this struct: the operator's browser, not this container. The field stays
+	// so installs that saved it here before the split keep their address, and is
+	// carried forward untouched on every save; it is deliberately absent from
+	// set(), which answers "is the *API access* overridden?".
 	PanelURL string `json:"panel_url,omitempty"`
 }
 
-// set reports whether the row carries anything at all — a cleared override is
-// stored as an empty object rather than deleted, so this is the "is overridden"
-// test everywhere.
+// set reports whether the row carries any API access of its own — a cleared
+// override is stored as an empty object rather than deleted, so this is the "is
+// overridden" test everywhere.
 func (c flomorphicAPIConfig) set() bool {
-	return c.URL != "" || c.JWTSecretEnc != "" || c.InfraHost != "" || c.PanelURL != ""
+	return c.URL != "" || c.JWTSecretEnc != "" || c.InfraHost != ""
 }
 
 func (s *Server) loadFlomorphicAPIConfig(ctx context.Context) (flomorphicAPIConfig, error) {
@@ -71,13 +74,17 @@ func (s *Server) effectiveFlomorphicAccess(ctx context.Context) (flomorphic.Acce
 		URL:       s.cfg.FlomorphicURL,
 		JWTSecret: s.cfg.FlomorphicJWTSecret,
 		InfraHost: s.cfg.InfraHost,
-		PanelURL:  s.cfg.FlomorphicPanelURL,
+	}
+	// The web app address resolves on its own track (its own setting, then the
+	// legacy field above, then env) because it is a browser-side address and must
+	// not be tied to whether the API access is overridden.
+	panelURL, _, panelErr := s.effectiveFlomorphicPanel(ctx, stored)
+	access.PanelURL = panelURL
+	if panelErr != nil {
+		return access, stored.set(), panelErr
 	}
 	if stored.URL != "" {
 		access.URL = stored.URL
-	}
-	if stored.PanelURL != "" {
-		access.PanelURL = stored.PanelURL
 	}
 	if stored.InfraHost != "" {
 		access.InfraHost = stored.InfraHost
@@ -115,18 +122,26 @@ func (s *Server) flomorphicAccessView(ctx context.Context) (fiber.Map, error) {
 	if err != nil {
 		return nil, err
 	}
+	_, panelFromEnv, err := s.effectiveFlomorphicPanel(ctx, stored)
+	if err != nil {
+		return nil, err
+	}
 	access := s.flo.Access()
 	return fiber.Map{
 		"apiConfigured": s.flo.Get() != nil,
 		"apiUrl":        access.URL,
 		"jwtSecretSet":  access.JWTSecret != "",
 		"infraHost":     access.InfraHost,
-		// Where the panel is, for the "open in FloMorphic" links. Empty means the
-		// operator has not said, and those links stay out of the way.
+		// Where the web app answers in a browser, for every "open in FloMorphic"
+		// link. Never empty in practice: env carries the standard compose's
+		// published port as its default.
 		"panelUrl": access.PanelURL,
 		// True while nothing is stored: the values are the deploy environment's and
 		// change only by editing .env + recreating the container.
 		"apiFromEnv": !stored.set(),
+		// Tracked separately from apiFromEnv — the web app address is its own
+		// setting with its own card, and either can be overridden alone.
+		"panelFromEnv": panelFromEnv,
 	}, nil
 }
 
@@ -136,9 +151,6 @@ type putFlomorphicAPIBody struct {
 	// back to the environment's.
 	JWTSecret string `json:"jwtSecret"`
 	InfraHost string `json:"infraHost"`
-	// Where the FloMorphic panel answers in a browser, for the links venapce's
-	// pages point at a flow or a run. Optional: blank clears it.
-	PanelURL string `json:"panelUrl"`
 }
 
 // PUT /api/settings/flomorphic/api — save where FloMorphic is, rebuild the live
@@ -170,7 +182,9 @@ func (s *Server) putFlomorphicAPISettings(c fiber.Ctx) error {
 		URL:          url,
 		JWTSecretEnc: secretEnc,
 		InfraHost:    strings.TrimSpace(body.InfraHost),
-		PanelURL:     strings.TrimRight(strings.TrimSpace(body.PanelURL), "/"),
+		// Not editable here any more (Settings → FloMorphic web app owns it), but
+		// carried forward so a pre-split install does not lose its address.
+		PanelURL: stored.PanelURL,
 	}
 	value, err := json.Marshal(cfg)
 	if err != nil {
@@ -225,7 +239,14 @@ func (s *Server) testFlomorphicAPISettings(c fiber.Ctx) error {
 // deploy environment's values. The row is emptied rather than deleted so the
 // settings table keeps a single shape for every key.
 func (s *Server) resetFlomorphicAPISettings(c fiber.Ctx) error {
-	value, err := json.Marshal(flomorphicAPIConfig{})
+	stored, err := s.loadFlomorphicAPIConfig(c.Context())
+	if err != nil {
+		return err
+	}
+	// Resetting the API access must not take the web app address with it: on a
+	// pre-split install that address is a field of this same row, and it is the
+	// other card's to clear.
+	value, err := json.Marshal(flomorphicAPIConfig{PanelURL: stored.PanelURL})
 	if err != nil {
 		return err
 	}

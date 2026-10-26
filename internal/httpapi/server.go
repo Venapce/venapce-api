@@ -145,6 +145,12 @@ func (s *Server) App() *fiber.App {
 	api.Put("/settings/flomorphic/api", s.putFlomorphicAPISettings)
 	api.Post("/settings/flomorphic/api/test", s.testFlomorphicAPISettings)
 	api.Post("/settings/flomorphic/api/reset", s.resetFlomorphicAPISettings)
+	// Where the FloMorphic *web app* answers in a browser — the base every "open
+	// in FloMorphic" link is built from. Its own routes, because it addresses the
+	// operator's browser rather than this container: FloMorphic's container name
+	// works for the API above and for nothing a browser opens.
+	api.Put("/settings/flomorphic/panel", s.putFlomorphicPanelSettings)
+	api.Post("/settings/flomorphic/panel/reset", s.resetFlomorphicPanelSettings)
 	api.Post("/settings/flomorphic/osspace", s.connectOsspace)
 	// (Re)start the in-process venapce plugin from the stored plugin env.
 	api.Post("/settings/flomorphic/plugin/restart", s.restartVenapcePlugin)
