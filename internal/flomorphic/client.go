@@ -21,6 +21,11 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// maxResponseBytes caps how much of one FloMorphic response is read. It is a
+// guard against a runaway body, not a page size: the flow list legitimately
+// runs to several megabytes.
+const maxResponseBytes = 32 << 20
+
 type Client struct {
 	baseURL   string
 	jwtSecret string
@@ -92,9 +97,18 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Read with room to spare but a hard ceiling: FloMorphic's list routes
+	// answer with whole rows, and a flow row carries its view_flow graph (tens
+	// of KB each), so a full flow list runs to megabytes. Reading one byte past
+	// the cap is what tells a body that is merely large from one that was cut —
+	// without it an over-cap body silently became truncated JSON and surfaced
+	// as a bogus "invalid FloMorphic response" parse error.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(data) > maxResponseBytes {
+		return nil, fmt.Errorf("FloMorphic response from %s exceeds %d bytes", path, maxResponseBytes)
 	}
 	if resp.StatusCode >= 400 {
 		return nil, &HTTPError{Status: resp.StatusCode, Body: truncate(data)}
